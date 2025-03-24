@@ -1,0 +1,4017 @@
+---
+title: "Figures for supplementary materials"
+author: "zhiyi"
+format:
+  html:
+    toc: true
+    toc-location: right
+    code-fold: true
+    embed-resources: true
+    number-sections: true
+editor: source
+---
+
+
+
+```{r}
+#| label: load_data
+#| message: false
+#| warning: false
+
+#-----------------------1: set road
+# input directory, absolute road
+dir_input <- "/sdc/CAMS/COVID-Fire"
+# output for data, absolute road
+dir_data <- "/sdc/CAMS/COVID-Fire/data_quarto_store"
+# output for figures, relative road
+dir_figs <- "supplementary"
+
+
+#-----------------------2: load packages
+library(magrittr)
+library(data.table)
+library(sf)
+library(spData)
+library(terra)
+library(tidyterra)
+library(ggplot2)
+library(patchwork)
+library(classInt)
+library(fixest)
+library(lubridate)
+
+
+#-----------------------3: parameters
+# parameters in mm
+con_axis_text = 3
+con_axis_title = 3
+con_plot_title = 3
+con_axis_line = 0.5
+# Original pixel size is 463^2 m2, transform in ha
+size_BA = base::round(463.31271653^2/10000, digits = 2)
+
+
+#-----------------------4: frequently used data
+##---------------4.1 weekly panel at 0.5°
+# the balance panel spans all 52 weeks from 2016-2020
+panel_balance <- fread(
+  file.path(dir_input, "data_panel/panel_pt5_0924.csv")
+)
+
+# the unbalance panel only keep observation in first 26 weeks and before lockdown.
+# Note that here we only keep grids that experienced lockdown, remove
+# those without matched policy or mobility indexes and those matched but not
+# experienced lockdown.
+panel_unbalance <- panel_balance %>%
+  # NA in original break_group were read as "" here.
+  .[break_group %in% c("unlock", "lock-mobility", "lock-policy", "lock-both")] %>%
+  .[break_group != "unlock"] %>%
+  .[(week <= 26)&(week <= cp_2)]
+
+
+##---------------4.2 frequently used data
+# world map without Antarctica
+world_rel <- world[world$name_long != "Antarctica", ]
+# combine geometries to derive the vector boundary of the world
+world_boundary <- st_union(world_rel)
+
+# global grid template with 0.5 degree
+rast_tmpl <- rast(
+  nrows = 360, ncols = 720, nlyrs = 1,
+  xmin = -180, xmax = 180, ymin = -90, ymax = 90,
+  crs = "EPSG:4326"
+)
+
+## map by oxford division
+#map_oxford <- st_read(
+#  file.path(dir_input, "data_process/Map/map_oxford.gpkg"),
+#  quiet = TRUE
+#)
+```
+
+
+
+# Figure S01
+
+Placebo tests for the overall fixed effects.
+
+```{r}
+#| label: fig_s01
+
+#-----------------------1: Placebo function
+placebo_fixed <- function(
+  rawdata,
+  boot = 1000,
+  seed = 182,
+  yvar = "actfire_sum",
+  xvar = "pl_shutdown",
+  controls = "+ weather_tempe + weather_tempe_square + weather_winds + weather_preci + weather_RH + weather_VPD",
+  fe = "intg_oxfordID^intg_biome^week + intg_oxfordID^intg_biome^year",
+  vvar = "intg_oxfordID^intg_biome"
+  ) {
+  
+  ##-------------1.1 preparation
+  # Here we permute by intg_oxfordID.
+  dt_raw <- data.table(
+    intg_oxfordID = rawdata[, unique(intg_oxfordID)]
+  )
+  vec_coef_pl = vector(mode = "numeric", length = boot)
+
+  fmla_fixed <- as.formula(
+    paste(yvar, "~", xvar, controls, "|", fe)
+  )
+  
+  
+  ##-------------1.2 placebo duplication
+  set.seed(seed)
+  
+  for (ii in 1:boot) {
+    
+    ##---- for each oxford administrative unit, randomly assign the treated year
+    dt_treat <- dt_raw %>%
+      copy() %>%
+      .[,
+        pl_year := cut(
+          x = runif(.N),
+          breaks = c(0, 0.25, 0.5, 0.75, 1),
+          include.lowest = TRUE,
+          labels = c("2016", "2017", "2018", "2019")
+        ) %>% as.character() %>% as.integer()
+      ]
+    
+    ##---- make placebo data frame
+    # set the variable "pl_shutdown" for DiD modeling.
+    pl_panel <- rawdata %>%
+      copy() %>%
+      .[year <= 2019] %>%
+      merge(
+        dt_treat, by = "intg_oxfordID",
+        all = FALSE, sort = FALSE
+      ) %>%
+      .[, indicator := as.integer(year == pl_year)] %>%                # 1 and 0
+      .[, pl_shutdown := shutdown * indicator]               # modeling variable
+    
+    ##---- fixed-effects models
+    fixed_glb <- feglm(
+      fmla_fixed,
+      pl_panel,
+      family = "poisson",
+      vcov = as.formula(paste0("~", vvar))
+    )
+    vec_coef_pl[ii] = coef(fixed_glb)["pl_shutdown"]
+    
+    
+    print(paste0(ii, " is done"))
+  }
+  
+  return(vec_coef_pl)
+}
+
+
+
+#-----------------------2: Placebo test
+# test for run-time
+#tt <- Sys.time()
+#vec_placebo_fixed <- placebo_fixed(
+#  panel_unbalance,
+#  boot = 10
+#)
+#print(Sys.time() - tt)
+
+# the specific running code is the "Main-3_2_placebo_fixed.R" under the "Fire" subfolder.
+#tt <- Sys.time()
+#vec_placebo_fixed <- placebo_fixed(
+#  panel_unbalance
+#)
+#print(Sys.time() - tt)                                         # 7.720767 hours
+#saveRDS(vec_placebo_fixed, file.path(dir_data, "Main-3_2_placebo_fixed.rds"))
+
+
+
+#-----------------------3: Placebo visualization
+##---------------3.1 placebo coefficients
+vec_placebo_fixed <- readRDS(
+  file.path(dir_data, "Main-3_2_placebo_fixed.rds")
+  ) %>% exp() - 1
+summary(vec_placebo_fixed)
+#      Min.   1st Qu.    Median      Mean   3rd Qu.      Max. 
+# -0.183199 -0.034018  0.008507  0.007219  0.050305  0.171303
+# The extremes on both sides are actually higher than our estimated coefficient.
+quantile(vec_placebo_fixed, 0.025)
+# -0.1159756
+quantile(vec_placebo_fixed, 0.975)
+#  0.1177888
+# Our estimated coefficient is slightly less than the 0.025 percentile.
+
+
+
+##---------------3.2 global real estimate
+yvar = "actfire_sum"
+xvar = "shutdown_2020"
+vvar = "intg_oxfordID^intg_biome"
+controls = "+ weather_tempe + weather_tempe_square + weather_winds + weather_preci + weather_RH + weather_VPD"
+fe = "intg_oxfordID^intg_biome^week + intg_oxfordID^intg_biome^year"
+
+fmla_fixed <- as.formula(
+  paste(yvar, "~", xvar, controls, "|", fe)
+)
+
+fixed_glb <- feglm(
+  fmla_fixed,
+  panel_unbalance,
+  family = "poisson",
+  vcov = as.formula(paste0("~", vvar))
+)
+# 需要提取估计系数和置信区间
+
+(exp(coef(fixed_glb)[["shutdown_2020"]]) - 1)*100                    # -11.82942
+(exp(confint(fixed_glb)["shutdown_2020", "2.5 %"]) - 1)*100          # -21.07793
+(exp(confint(fixed_glb)["shutdown_2020", "97.5 %"]) - 1)*100         # -1.497115
+note_coef <- paste0(
+  "Real estimate:",
+  "\n",
+  sprintf("%0.1f", (exp(coef(fixed_glb)[["shutdown_2020"]]) - 1)*100 ),
+  " (",
+  sprintf("%0.1f", (exp(confint(fixed_glb)["shutdown_2020", "2.5 %"]) - 1)*100),
+  ", ",
+  sprintf("%0.1f", (exp(confint(fixed_glb)["shutdown_2020", "97.5 %"]) - 1)*100),
+  ")"
+)
+
+
+##---------------3.3 Plot
+ggplot() +
+  # 95% CI of placebo sample coefficients
+  annotate(
+    "rect",
+    xmin = quantile(vec_placebo_fixed, 0.025)*100,
+    xmax = quantile(vec_placebo_fixed, 0.975)*100,
+    ymin = -Inf,
+    ymax = Inf,
+    fill = "grey95"
+  ) +
+  # distribution of placebo sample coefficients
+  geom_histogram(
+    aes(
+      x = vec_placebo_fixed * 100,
+      y = ..count../length(vec_placebo_fixed)
+    ),
+    binwidth = 1,
+    color = "grey", linewidth = 0.1
+  ) +
+  # our real estimate
+  annotate(
+    "segment",
+    x = (exp(coef(fixed_glb)[["shutdown_2020"]]) - 1)*100,
+    xend = (exp(coef(fixed_glb)[["shutdown_2020"]]) - 1)*100,
+    y = 0,
+    yend = 0.062,
+    color = "steelblue", linetype = "dashed", linewidth = con_axis_line
+  ) +
+  # label of our real estimate
+  annotate(
+    "text",
+    x = (exp(coef(fixed_glb)[["shutdown_2020"]]) - 1)*100,
+    y = 0.065,
+    label = note_coef,
+    vjust = "outward",
+    color = "steelblue", size = con_axis_text, fontface = "bold"
+  ) +
+  scale_x_continuous(
+    breaks = seq(-20, 20, 10),
+    limits = c(-20, 20),
+    expand = expansion(add = 1)
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, 0.08, 0.02),
+    labels = c(0, 0.02, 0.04, 0.06, 0.08),
+    limits = c(0, 0.08),
+    expand = expansion(add = c(0, 0))
+  ) +
+  theme(
+    panel.background = element_rect(fill = "white"),
+    axis.line.x.bottom = element_line(linewidth = 0.2),
+    axis.line.y.left = element_line(linewidth = 0.2),
+    
+    panel.grid.minor = element_blank(),
+    axis.title = element_text(size = con_axis_title * .pt),
+    axis.text = element_text(size = con_axis_text * .pt)
+  ) +
+  labs(
+    x = "Estimated coefficients (%)",
+    y = "Share of estimates"
+  )
+
+
+#ggsave(
+#  file.path(dir_figs, "fig_s01.pdf"),
+#  width = 120, height = 60, units = "mm"
+#)
+#ggsave(
+#  file.path(dir_figs, "fig_s01.png"),
+#  dpi = 300,
+#  width = 120, height = 60, units = "mm"
+#)
+
+```
+
+
+
+# Figure S02
+
+The overall results of temporal impact analysis.
+
+```{r}
+#| label: fig_s02
+
+#-----------------------1: Modeling
+##---------------1.1 formula
+yvar = "actfire_sum"
+xvar = "i(week_to_2020, ref = c(-1000, -1))"
+vvar = "intg_oxfordID^intg_biome"            # Poisson residuals cannot be"iid", otherwise abnormally significant
+controls = "+ weather_tempe + weather_tempe_square + weather_winds + weather_preci + weather_RH + weather_VPD"
+fe = "intg_oxfordID^intg_biome^week + intg_oxfordID^intg_biome^year"
+
+fmla_event <- as.formula(
+  paste(yvar, "~", xvar, controls, "|", fe)
+)
+
+
+##---------------1.2 global regression
+event_glb <- feglm(
+  fmla_event,
+  panel_unbalance,
+  family = "poisson",
+  vcov = as.formula(paste0("~", vvar))
+)
+iplot(
+  event_glb,
+  xlim = c(-10, 15), ylim = c(-1, 1),
+  xlab = "Week since shutdown", ylab = "Coefficients",
+  main = "Shutdown effect on active fire in the world"
+)
+
+
+
+#-----------------------2: Extract coefficients
+dt_fig_s02 <- data.table(
+  var_i = paste("week_to_2020", (-5:10), sep = "::"),
+  week = -5:10,
+  coef = NaN, p = NaN,
+  CI_025 = NaN, CI_975 = NaN,
+  se_low = NaN, se_up = NaN
+  ) %>%
+  .[week != -1]
+
+for (ii in 1:nrow(dt_fig_s02)) {
+  
+  var_i_here <- dt_fig_s02[ii, var_i]
+  
+  dt_fig_s02[
+    ii,
+    c("coef", "p", "CI_025", "CI_975", "se_low", "se_up") := .(
+      coeftable(event_glb)[var_i_here, "Estimate"] %>% exp() - 1,
+      coeftable(event_glb)[var_i_here, "Pr(>|z|)"],
+      confint(event_glb, level = 0.95)[var_i_here, "2.5 %"] %>% exp() -1,
+      confint(event_glb, level = 0.95)[var_i_here, "97.5 %"] %>% exp() - 1,
+      
+      (coeftable(event_glb)[var_i_here, "Estimate"] -
+         coeftable(event_glb)[var_i_here, "Std. Error"]) %>% exp() - 1,
+      (coeftable(event_glb)[var_i_here, "Estimate"] +
+         coeftable(event_glb)[var_i_here, "Std. Error"]) %>% exp() - 1
+    )
+  ]
+}
+dt_fig_s02[p < 0.05, indicator := "significant"]
+
+
+
+#-----------------------3: Plot
+ggplot(dt_fig_s02) +
+  # auxiliary line and point
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey") +
+  geom_vline(xintercept = -1, linetype = "dashed", color = "grey") +
+  annotate(
+    "point",
+    x = -1, y = 0, color = "grey40"
+  ) +
+  # coefficients of each week since shutdown
+  geom_linerange(
+    aes(
+      x = week,
+      ymin = CI_025*100, ymax = CI_975*100
+    ),
+    linewidth = 1, color = "#377EB8", alpha = 0.5
+  ) +
+  geom_linerange(
+    aes(
+      x = week,
+      ymin = se_low*100, ymax = se_up*100
+    ),
+    linewidth = 2.5, color = "#377EB8", alpha = 0.5
+  ) +
+  geom_point(
+    aes(
+      x = week,
+      y = coef*100,
+      fill = indicator
+    ),
+    shape = 21, size = 3, color = "#377EB8"
+  ) +
+  scale_fill_manual(
+    values = c("significant" = "#377EB8"),
+    na.value = "white",
+    guide = NULL
+  ) +
+  theme(
+    plot.title.position = "plot",
+    
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "white"),
+    axis.line.x.bottom = element_line(linewidth = con_axis_line*0.5),
+    axis.line.y.left = element_line(linewidth = con_axis_line*0.5),
+    
+    axis.text.y.left = element_text(size = con_axis_text*.pt),
+    axis.title.y.left = element_text(color = "black"),
+    
+    axis.text.x.bottom = element_text(size = con_axis_text*.pt),
+    axis.title = element_text(size = con_axis_title*.pt),
+    plot.title = element_text(size = con_axis_title*.pt, face = "bold")
+  ) +
+  labs(
+    title = NULL,
+    x = "Weeks since mobility restriction",
+    y = "Changes in fire incidence (%)"
+  )
+
+
+#ggsave(
+#  file.path(dir_figs, "fig_s02.pdf"),
+#  width = 90, height = 60, units = "mm"
+#)
+```
+
+
+# Figure S03
+
+The overall results of global response curve.
+We have already acquired bootstrap simulation of global response in the Figure 3 in main text.
+
+```{r}
+#| label: fig_s03
+
+#-----------------------1: Panel for spline
+# Oxford dataset: full series from 2020.01.01 to 2020.12.31
+# Mobility index:
+#  - China: full series from 2020.01.01 to 2020.05.02
+#  - World: series (maybe with missing values) from 2020.02.15 to 2020.12.31
+
+panel_spline <- panel_unbalance %>%
+  copy() %>%
+  .[!is.na(intg_oxfordID)] %>%                        # 必须匹配上了牛津政策指数
+  .[!is.na(intg_mobilityID)] %>%                      # 必须匹配上了移动性指数***
+  #.[break_group == "lock-both"] %>%                # 这是新加的,一会儿跑一下试试
+  # transform mobility_SI and mobility_index to original units first
+  .[,
+    `:=`(
+      mobility_SI = mobility_SI / 100,
+      mobility_index = mobility_index / 100
+    )
+  ] %>%
+  # For mobility_SI, there are no NA and negative values during shutdown in 2020, as expected.
+  # And all observations in 2016-2019 or before shutdown in 2020 are set as 0.
+  # But for mobility_index, there are NA (21%) and negative values. We leaves NA alone.
+  # Now we manually set the numbers bigger than 0(1%) as 0, and then 
+  # transform the interval [-100, 0] to [0, 100]
+  .[mobility_index > 0, mobility_index := 0] %>%
+  .[, mobility_index := mobility_index * -1] %>%
+  # spline coordinates for mobility_SI
+  .[, paste0("ns_SI_", 1:4) := as.data.frame(
+        splines::ns(
+          mobility_SI,
+          # SI的分布过于集中在后面了
+          knots = c(50, 80, 95), intercept = FALSE,
+          Boundary.knots = c(0, 100)
+        )
+    )] %>%
+  # essential***
+  .[shutdown_2020 == 0, paste0("ns_SI_", 1:4) := 0] %>%
+  # spline coordinates for mobility_index
+  .[, paste0("ns_mob_", 1:4) := as.data.frame(
+        splines::ns(
+          mobility_index,
+          knots = c(20, 40, 60), intercept = FALSE,
+          Boundary.knots = c(0, 100)
+        )
+    )] %>%
+  # essential***
+  .[shutdown_2020 == 0, paste0("ns_mob_", 1:4) := 0] %>%
+  # for the following linear effect size
+  .[shutdown_2020 == 0, mobility_index := 0]
+
+panel_spline[shutdown_2020 == 1, summary(mobility_index)]
+# Min. 1st Qu.  Median    Mean 3rd Qu.    Max.    NA's 
+# 0.00   24.28   34.28   34.27   44.28   92.68       9
+panel_spline[shutdown_2020 == 1, quantile(mobility_index, probs = seq(0, 1, 0.1), na.rm = TRUE)]
+#   0%   10%   20%   30%   40%   50%   60%   70%   80%   90%  100% 
+# 0.00 13.87 22.42 26.85 29.28 34.28 38.85 41.14 47.14 53.28 92.68
+# 53.28*** account for 90% observations
+
+
+
+#-----------------------2: Bootstrap coefficients
+# First subset for global simulation.
+# rawdf contains initial simulated values.
+# Now we extract the 95%CI and mean, return these summary statistics.
+df_spline_mob <- readRDS(file.path(dir_data, "Main-3_2_bootstrap_curve.rds"))[[1]]
+
+# We need to exponent these original coefficients at first.
+mydf <- data.frame(
+  pts = df_spline_mob[, "pts"],
+  average = apply(
+    df_spline_mob[, 2:dim(df_spline_mob)[2]], 1,
+    function(x){exp(mean(x)) - 1}
+  ),
+  CI_low = apply(
+    df_spline_mob[, 2:dim(df_spline_mob)[2]], 1,
+    function(x){exp(quantile(x, probs = 0.025)) - 1}
+  ),
+  CI_up = apply(
+    df_spline_mob[, 2:dim(df_spline_mob)[2]], 1,
+    function(x){exp(quantile(x, probs = 0.975)) - 1}
+  ),
+  se_low = apply(
+    df_spline_mob[, 2:dim(df_spline_mob)[2]], 1,
+    function(x){exp(mean(x) - sd(x)) - 1}
+  ),
+  se_up = apply(
+    df_spline_mob[, 2:dim(df_spline_mob)[2]], 1,
+    function(x){exp(mean(x) + sd(x)) - 1}
+  )
+)
+
+
+
+#-----------------------3: Sample distribution
+# extract sample numbers in each bin for the histogram.
+# set 1 as binwidth, from 0 to 100.
+
+dt_number <- panel_spline %>%
+  .[shutdown_2020 == 1] %>%
+  # classify into intervals and type labels
+  .[,
+    interval := cut(
+      mobility_index,
+      breaks = seq(-0.5, 100.5, 1),
+      labels = as.character(seq(0, 100, 1))
+    )
+  ] %>%
+  # count numbers in each interval
+  .[,
+    .(count = .N),
+    by = "interval"
+  ] %>%
+  .[, frequency := count/sum(count, na.rm = TRUE)] %>%
+  .[order(interval)]
+# set the frequency as the vertical height of each interval,
+# while an interval needs two vertical lines at behind and after.
+dt_before <- dt_number %>%
+  .[interval != "0"] %>%    # exclude interval 0 to avoid conflict in histograms
+  copy() %>%
+  .[,
+    `:=`(
+      position = as.numeric(as.character(interval)) - 0.5,
+      order = "a"
+    )
+  ]
+dt_after <- dt_number %>%
+  .[interval != "0"] %>%    # exclude interval 0 to avoid conflict in histograms
+  copy() %>%
+  .[,
+    `:=`(
+      position = as.numeric(as.character(interval)) + 0.5,
+      order = "b"
+    )
+  ]
+# for the final geom_path
+dt_bins <- dt_before %>%
+  rbind(dt_after) %>%
+  .[order(interval, order)] %>%
+  # assign the base height and multiply factor
+  .[,
+    `:=`(
+      scale_frequency = -50 + 120*frequency,
+      scale_base = -50
+    )
+  ]
+# for the final geom_segment and geom_path
+dt_obs_vertical <- dt_bins %>%
+  # only keep a vertical line with max height in each position
+  .[order(position, -frequency)] %>%
+  .[, .SD[1], by = "position"]
+
+
+
+#-----------------------3: Plot
+ggplot(data = mydf) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey") +
+  geom_ribbon(
+    aes(
+      x = pts,
+      ymin = CI_low*100, ymax = CI_up*100
+    ),
+    fill = "steelblue1", alpha = 0.1
+  ) +
+  geom_ribbon(
+    aes(
+      x = pts,
+      ymin = se_low*100, ymax = se_up*100
+    ),
+    fill = "steelblue1", alpha = 0.2
+  ) +
+  geom_line(
+    aes(
+      x = pts,
+      y = average*100
+    ),
+    color = "#377EB8", linewidth = 0.8
+  ) +
+  geom_segment(
+    aes(
+      x = position, xend = position,
+      y = scale_base, yend = scale_frequency
+    ),
+    data = dt_obs_vertical,
+    linewidth = 0.15
+  ) +
+  geom_path(
+    aes(x = position, y = scale_frequency),
+    data = dt_bins,
+    linewidth = 0.15
+  ) +
+  theme(
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "white"),
+    
+    axis.line.x.bottom = element_line(linewidth = con_axis_line*0.5),
+    axis.line.y.left = element_line(linewidth = con_axis_line*0.5),
+    
+    plot.title.position = "plot",
+    
+    axis.text = element_text(size = con_axis_text*.pt),
+    axis.title = element_text(size = con_axis_title*.pt),
+    plot.title = element_text(size = con_plot_title*.pt, face = "bold"),
+    plot.subtitle = element_text(size = con_plot_title*.pt)
+  ) +
+  scale_x_continuous(
+    name = "Mobility reduction (%)",
+    limits = c(0, 55.5),
+    breaks = seq(0, 50, 10)
+  ) +
+  scale_y_continuous(
+    name = "Response of fire incidence (%)",
+    breaks = seq(-40, 20, 20)
+  ) +
+  coord_cartesian(
+    ylim = c(-50, 24), xlim = c(0, 55.5),
+    expand = FALSE
+  ) +
+  labs(
+    title = NULL
+  )
+
+#ggsave(
+#  file.path(dir_figs, "fig_s03.pdf"),
+#  width = 90, height = 60, units = "mm"
+#)
+```
+
+
+
+# Figure S04
+
+## Real estimates of temporal impact
+
+```{r}
+#| label: real_temporal
+
+# regression results in country level in figure 2
+dt_coef_country <- readRDS(
+  file.path(dir_data, "Main-3_2_dt_coef_country.rds")
+)
+
+
+#-----------------------1: Formula
+yvar = "actfire_sum"
+xvar = "i(week_to_2020, ref = c(-1000, -1))"
+vvar = "intg_oxfordID^intg_biome"         # poisson残差不能用"iid", 否则异常显著
+controls = "+ weather_tempe + weather_tempe_square + weather_winds + weather_preci + weather_RH + weather_VPD"
+fe = "intg_oxfordID^intg_biome^week + intg_oxfordID^intg_biome^year"
+
+fmla_event <- as.formula(
+  paste(yvar, "~", xvar, controls, "|", fe)
+)
+
+
+
+#-----------------------2: Model
+##---------------2.1 Global regression
+event_glb <- feglm(
+  fmla_event,
+  panel_unbalance,
+  family = "poisson",
+  vcov = as.formula(paste0("~", vvar))
+)
+iplot(
+  event_glb,
+  xlim = c(-10, 15), ylim = c(-1, 1),
+  xlab = "Week since shutdown", ylab = "Coefficients",
+  main = "Shutdown effect on active fire in the world"
+)
+
+
+##---------------2.2 Countries with decreased fire
+event_dec <- feglm(
+  fmla_event,
+  panel_unbalance[CountryName %in% dt_coef_country[coef < 0, group_lab]],
+  family = "poisson",
+  vcov = as.formula(paste0("~", vvar))
+)
+iplot(
+  event_dec,
+  xlim = c(-10, 15), ylim = c(-1, 1),
+  xlab = "Week since shutdown", ylab = "Coefficients",
+  main = "Shutdown effect on countries with decreased fires during the shutdown"
+)
+
+
+##---------------2.3 Countries with increased fire
+event_inc <- feglm(
+  fmla_event,
+  panel_unbalance[CountryName %in% dt_coef_country[coef > 0, group_lab]],
+  family = "poisson",
+  vcov = as.formula(paste0("~", vvar))
+)
+iplot(
+  event_inc,
+  xlim = c(-10, 15), ylim = c(-1, 1),
+  xlab = "Week since shutdown", ylab = "Coefficients",
+  main = "Shutdown effect on countries with increased fires during the shutdown"
+)
+
+```
+
+
+## Placebo estimates of temporal impact
+
+```{r}
+#| label: placebo_temporal
+
+# regression results in country level in figure 2
+dt_coef_country <- readRDS(
+  file.path(dir_data, "Main-3_2_dt_coef_country.rds")
+)
+
+
+#-----------------------1: Placebo function
+## This chunk defines the placebo-test function for Event-study.
+# We randomly assign the treatment year between 2016 and 2019 for each intg_oxfordID,
+# while maintaining consistent start-week series at the grid level.
+# The first action consider the fact that fixed effects in our model are
+# set at administrative region level rather than the grid level.
+# The second action consider that changepoints identified for each grid may not
+# be homogeneous within each administrative_oxford level, such as mobility
+# approach for China and other areas.
+
+placebo_event <- function(
+    rawdata,
+    boot = 1000,
+    seed = 182,
+    yvar = "actfire_sum",
+    xvar = "i(week_to_pl_year, ref = c(-1000, -1))",
+    controls = "+ weather_tempe + weather_tempe_square + weather_winds + weather_preci + weather_RH + weather_VPD",
+    fe = "intg_oxfordID^intg_biome^week + intg_oxfordID^intg_biome^year",
+    vvar = "intg_oxfordID^intg_biome"
+){
+  # input: original data
+  # output: a data.frame of samples (row for each week, column for each sample)
+  # pre-package: data.table, magrittr
+  
+  
+  #--------------1.1 preparation
+  # Here we permute by intg_oxfordID
+  dt_raw <- data.table(
+    intg_oxfordID = rawdata[, unique(intg_oxfordID)]
+  )
+  
+  # column names for samples
+  samp_cols <- paste0(
+    "sample_", stringr::str_pad(1:boot, width = 4, side = "left", pad = 0)
+  )
+  # final data.table
+  ## global data.table
+  mine_dt_glb <- data.table(
+    relative_week = seq(
+      from = max(-10, rawdata[week_to_treated != -1000, min(week_to_treated)]),
+      to = min(15, rawdata[, max(week_to_treated)]),
+      by = 1
+    ),
+    week_to_pl_year = paste(
+      "week_to_pl_year",
+      seq(
+        from = max(-10, rawdata[week_to_treated != -1000, min(week_to_treated)]),
+        to = min(15, rawdata[, max(week_to_treated)]),
+        by = 1
+      ),
+      sep = "::"
+    )
+  ) %>%
+    .[relative_week != -1] %>%
+    # add columns in batches
+    .[, (samp_cols) := list(NA)]
+  ## countries with decreased fire
+  mine_dt_dec <- copy(mine_dt_glb)
+  ## countries with increased fire
+  mine_dt_inc <- copy(mine_dt_glb)
+  
+  # formula for the event study
+  fmla_event <- as.formula(
+    paste(yvar, "~", xvar, controls, "|", fe)
+  )
+  
+  
+  ##-------------1.2 placebo duplication
+  set.seed(seed)
+  
+  for (ii in 1:boot) {
+    
+    ##-- randomly assign treatment year within each intg_oxfordID
+    dt_treat <- dt_raw %>%
+      copy() %>%
+      .[,
+        pl_year := cut(
+          x = runif(.N),
+          breaks = c(0, 0.25, 0.5, 0.75, 1),
+          include.lowest = TRUE,
+          labels = c("2016", "2017", "2018", "2019")
+        ) %>% as.character() %>% as.integer()
+      ]
+    
+    ##-- join data.table and set "week_to_plyear"
+    pl_panel <- rawdata %>%
+      copy() %>%
+      .[year <= 2019] %>%
+      merge(
+        dt_treat, by = "intg_oxfordID",
+        all = FALSE, sort = FALSE
+      ) %>%
+      # week_to_pl_year works as the modeling variable
+      .[, week_to_pl_year := -1000] %>%                       # -1000 as default
+      # 1) randomly assgin treatment year at the oxford_admin level
+      # 2) inherent specific identification results at the pixel level
+      .[year == pl_year, week_to_pl_year := week_to_treated]
+    
+    ##-- event-study coefficients for globe
+    event_glb <- feglm(
+      fmla_event,
+      pl_panel,
+      family = "poisson",
+      vcov = as.formula(paste0("~", vvar))
+    )
+    result_glb <- coeftable(event_glb)
+    coef_glb <- result_glb[mine_dt_glb$week_to_pl_year, "Estimate"]
+    names(coef_glb) <- NULL
+    # fill coefficients
+    mine_dt_glb[, (ii+2) := coef_glb]
+    
+    ##-- event-study coefficients for countries with decreased fire
+    event_dec <- feglm(
+      fmla_event,
+      pl_panel[CountryName %in% dt_coef_country[coef < 0, group_lab]],
+      family = "poisson",
+      vcov = as.formula(paste0("~", vvar))
+    )
+    result_dec <- coeftable(event_dec)
+    coef_dec <- result_dec[mine_dt_dec$week_to_pl_year, "Estimate"]
+    names(coef_dec) <- NULL
+    # fill coefficients
+    mine_dt_dec[, (ii+2) := coef_dec]
+    
+    ##-- event-study coefficients for countries with increased fire
+    event_inc <- feglm(
+      fmla_event,
+      pl_panel[CountryName %in% dt_coef_country[coef > 0, group_lab]],
+      family = "poisson",
+      vcov = as.formula(paste0("~", vvar))
+    )
+    result_inc <- coeftable(event_inc)
+    coef_inc <- result_inc[mine_dt_inc$week_to_pl_year, "Estimate"]
+    names(coef_inc) <- NULL
+    # fill coefficients
+    mine_dt_inc[, (ii+2) := coef_inc]
+    
+    
+    print(paste0(ii, " is done"))
+    
+  }
+  
+  list_all <- list(mine_dt_glb, mine_dt_dec, mine_dt_inc)
+  return(list_all)
+  
+}
+
+
+
+#-----------------------2: Placebo test
+# 时间测试
+tt <- Sys.time()
+list_placebo_event <- placebo_event(
+  panel_unbalance,
+  boot = 10
+)
+print(Sys.time() - tt)                                          # 1.172558 hours
+# 10个循环, 用时为1.172558 hours.
+# 那么换算到1000个循环, 用时约为117小时.
+
+# 具体执行文件见Fire文件夹下的Main-3_2_placebo_event.R.
+#tt <- Sys.time()
+#list_placebo_event <- placebo_event(
+#  panel_unbalance
+#)
+#print(Sys.time() - tt)                                         # 4.564204 days
+#saveRDS(list_placebo_event, file.path(dir_data, "Main-3_2_placebo_event.rds"))
+```
+
+
+## A - Temporal impact of countries with decreased fire
+
+
+```{r}
+#| label: temporal_decrease
+
+#-----------------------1: Placebo estimates
+# The original placebo tests.
+raw_temporal_dec_placebo <- readRDS(
+  file.path(dir_data, "Main-3_2_placebo_event.rds")
+)[[2]]
+
+# We need to exponent these original coefficients at first.
+# Note that samples start from column 3.
+dt_temporal_dec_placebo <- data.frame(
+  week = raw_temporal_dec_placebo[, relative_week],
+  average = apply(
+    raw_temporal_dec_placebo[, 3:dim(raw_temporal_dec_placebo)[2]], 1,
+    function(x){exp(mean(x)) - 1}
+  ),
+  CI_025 = apply(
+    raw_temporal_dec_placebo[, 3:dim(raw_temporal_dec_placebo)[2]], 1,
+    function(x){exp(quantile(x, probs = 0.025)) - 1}
+  ),
+  CI_975 = apply(
+    raw_temporal_dec_placebo[, 3:dim(raw_temporal_dec_placebo)[2]], 1,
+    function(x){exp(quantile(x, probs = 0.975)) - 1}
+  ),
+  se_low = apply(
+    raw_temporal_dec_placebo[, 3:dim(raw_temporal_dec_placebo)[2]], 1,
+    function(x){exp(mean(x) - sd(x)) - 1}
+  ),
+  se_up = apply(
+    raw_temporal_dec_placebo[, 3:dim(raw_temporal_dec_placebo)[2]], 1,
+    function(x){exp(mean(x) + sd(x)) - 1}
+  )
+) %>%
+  setDT() %>%
+  .[week %in% -5:10]
+
+
+
+#-----------------------2: Real estimates
+dt_temporal_dec_real <- data.table(
+  var_i = paste("week_to_2020", (-5:10), sep = "::"),
+  week = -5:10,
+  coef = NaN, p = NaN,
+  CI_025 = NaN, CI_975 = NaN,
+  se_low = NaN, se_up = NaN
+  ) %>%
+  .[week != -1]
+
+for (ii in 1:nrow(dt_temporal_dec_real)) {
+  
+  var_i_here <- dt_temporal_dec_real[ii, var_i]
+  
+  dt_temporal_dec_real[
+    ii,
+    c("coef", "p", "CI_025", "CI_975", "se_low", "se_up") := .(
+      coeftable(event_dec)[var_i_here, "Estimate"] %>% exp() - 1,
+      coeftable(event_dec)[var_i_here, "Pr(>|z|)"],
+      confint(event_dec, level = 0.95)[var_i_here, "2.5 %"] %>% exp() -1,
+      confint(event_dec, level = 0.95)[var_i_here, "97.5 %"] %>% exp() - 1,
+      
+      (coeftable(event_dec)[var_i_here, "Estimate"] -
+         coeftable(event_dec)[var_i_here, "Std. Error"]) %>% exp() - 1,
+      (coeftable(event_dec)[var_i_here, "Estimate"] +
+         coeftable(event_dec)[var_i_here, "Std. Error"]) %>% exp() - 1
+    )
+  ]
+}
+dt_temporal_dec_real[p < 0.05, indicator := "significant"]
+
+
+
+#-----------------------3: Plot
+ggplot() +
+  # placebo coefficients for each week since lockdown
+  geom_ribbon(
+    aes(
+      x = week,
+      ymin = CI_025*100, ymax = CI_975*100
+    ),
+    data = dt_temporal_dec_placebo,
+    fill = "grey",
+    alpha = 0.15
+  ) +
+  geom_ribbon(
+    aes(
+      x = week,
+      ymin = se_low*100, ymax = se_up*100
+    ),
+    data = dt_temporal_dec_placebo,
+    fill = "grey",
+    alpha = 0.30
+  ) +
+  geom_line(
+    aes(
+      x = week, y = average * 100
+    ),
+    data = rbindlist(
+      list(
+        dt_temporal_dec_placebo,
+        data.table(week = -1, average = 0)
+      ),
+      fill = TRUE
+    ),
+    color = "grey60", alpha = 0.8
+  ) +
+  geom_point(
+    aes(
+      x = week, y = average * 100
+    ),
+    data = dt_temporal_dec_placebo,
+    color = "grey60",
+    size = 1
+  ) +
+  # auxiliary line and point
+  geom_hline(yintercept = 0, linetype = "dashed", color = "#984EA3") +
+  geom_vline(xintercept = -1, linetype = "dashed", color = "#984EA3") +
+  annotate(
+    "point",
+    x = -1, y = 0, color = "#984EA3", size = 2
+  ) +
+  # real coefficients for each week since lockdown
+  geom_linerange(
+    aes(
+      x = week,
+      ymin = CI_025*100, ymax = CI_975*100
+    ),
+    data = dt_temporal_dec_real,
+    linewidth = 1, color = "#377EB8", alpha = 0.5
+  ) +
+  geom_linerange(
+    aes(
+      x = week,
+      ymin = se_low*100, ymax = se_up*100
+    ),
+    data = dt_temporal_dec_real,
+    linewidth = 2.5, color = "#377EB8", alpha = 0.5
+  ) +
+  geom_point(
+    aes(
+      x = week,
+      y = coef*100,
+      fill = indicator
+    ),
+    data = dt_temporal_dec_real,
+    shape = 21, size = 3, color = "#377EB8"
+  ) +
+  scale_fill_manual(
+    values = c("significant" = "#377EB8"),
+    na.value = "white",
+    guide = NULL
+  ) +
+  scale_y_continuous(
+    breaks =c(-50, -25, 0, 25, 50)
+  ) +
+  theme(
+    plot.title.position = "plot",
+    
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "white"),
+    axis.line.x.bottom = element_line(linewidth = con_axis_line*0.5),
+    axis.line.y.left = element_line(linewidth = con_axis_line*0.5),
+    
+    axis.text.y.left = element_text(size = con_axis_text*.pt),
+    axis.title.y.left = element_text(color = "black"),
+    
+    axis.text.x.bottom = element_text(size = con_axis_text*.pt),
+    axis.title = element_text(size = con_axis_title*.pt),
+    plot.title = element_text(size = con_axis_title*.pt, face = "bold")
+  ) +
+  labs(
+    title = "A",
+    x = "Weeks since mobility restriction",
+    y = "Changes in fire incidence (%)"
+  )
+
+#ggsave(
+#  file.path(dir_figs, "fig_s04_a.pdf"),
+#  width = 90, height = 60, units = "mm"
+#)
+```
+
+
+## B - Temporal impact of countries with increased fire
+
+
+```{r}
+#| label: temporal_increase
+
+#-----------------------1: Placebo estimates
+# The original placebo tests.
+raw_temporal_inc_placebo <- readRDS(
+  file.path(dir_data, "Main-3_2_placebo_event.rds")
+)[[3]]
+
+# We need to exponent these original coefficients at first.
+# Note that samples start from column 3.
+dt_temporal_inc_placebo <- data.frame(
+  week = raw_temporal_inc_placebo[, relative_week],
+  average = apply(
+    raw_temporal_inc_placebo[, 3:dim(raw_temporal_inc_placebo)[2]], 1,
+    function(x){exp(mean(x)) - 1}
+  ),
+  CI_025 = apply(
+    raw_temporal_inc_placebo[, 3:dim(raw_temporal_inc_placebo)[2]], 1,
+    function(x){exp(quantile(x, probs = 0.025)) - 1}
+  ),
+  CI_975 = apply(
+    raw_temporal_inc_placebo[, 3:dim(raw_temporal_inc_placebo)[2]], 1,
+    function(x){exp(quantile(x, probs = 0.975)) - 1}
+  ),
+  se_low = apply(
+    raw_temporal_inc_placebo[, 3:dim(raw_temporal_inc_placebo)[2]], 1,
+    function(x){exp(mean(x) - sd(x)) - 1}
+  ),
+  se_up = apply(
+    raw_temporal_inc_placebo[, 3:dim(raw_temporal_inc_placebo)[2]], 1,
+    function(x){exp(mean(x) + sd(x)) - 1}
+  )
+) %>%
+  setDT() %>%
+  .[week %in% -5:10]
+
+
+
+#-----------------------2: Real estimates
+dt_temporal_inc_real <- data.table(
+  var_i = paste("week_to_2020", (-5:10), sep = "::"),
+  week = -5:10,
+  coef = NaN, p = NaN,
+  CI_025 = NaN, CI_975 = NaN,
+  se_low = NaN, se_up = NaN
+  ) %>%
+  .[week != -1]
+
+for (ii in 1:nrow(dt_temporal_inc_real)) {
+  
+  var_i_here <- dt_temporal_inc_real[ii, var_i]
+  
+  dt_temporal_inc_real[
+    ii,
+    c("coef", "p", "CI_025", "CI_975", "se_low", "se_up") := .(
+      coeftable(event_inc)[var_i_here, "Estimate"] %>% exp() - 1,
+      coeftable(event_inc)[var_i_here, "Pr(>|z|)"],
+      confint(event_inc, level = 0.95)[var_i_here, "2.5 %"] %>% exp() -1,
+      confint(event_inc, level = 0.95)[var_i_here, "97.5 %"] %>% exp() - 1,
+      
+      (coeftable(event_inc)[var_i_here, "Estimate"] -
+         coeftable(event_inc)[var_i_here, "Std. Error"]) %>% exp() - 1,
+      (coeftable(event_inc)[var_i_here, "Estimate"] +
+         coeftable(event_inc)[var_i_here, "Std. Error"]) %>% exp() - 1
+    )
+  ]
+}
+dt_temporal_inc_real[p < 0.05, indicator := "significant"]
+
+
+
+#-----------------------3: Plot
+ggplot() +
+  # placebo coefficients for each week since lockdown
+  geom_ribbon(
+    aes(
+      x = week,
+      ymin = CI_025*100, ymax = CI_975*100
+    ),
+    data = dt_temporal_inc_placebo,
+    fill = "grey",
+    alpha = 0.15
+  ) +
+  geom_ribbon(
+    aes(
+      x = week,
+      ymin = se_low*100, ymax = se_up*100
+    ),
+    data = dt_temporal_inc_placebo,
+    fill = "grey",
+    alpha = 0.30
+  ) +
+  geom_line(
+    aes(
+      x = week, y = average * 100
+    ),
+    data = rbindlist(
+      list(
+        dt_temporal_inc_placebo,
+        data.table(week = -1, average = 0)
+      ),
+      fill = TRUE
+    ),
+    color = "grey60", alpha = 0.8
+  ) +
+  geom_point(
+    aes(
+      x = week, y = average * 100
+    ),
+    data = dt_temporal_inc_placebo,
+    color = "grey60",
+    size = 1
+  ) +
+  # auxiliary line and point
+  geom_hline(yintercept = 0, linetype = "dashed", color = "#984EA3") +
+  geom_vline(xintercept = -1, linetype = "dashed", color = "#984EA3") +
+  annotate(
+    "point",
+    x = -1, y = 0, color = "#984EA3", size = 2
+  ) +
+  # real coefficients for each week since lockdown
+  geom_linerange(
+    aes(
+      x = week,
+      ymin = CI_025*100, ymax = CI_975*100
+    ),
+    data = dt_temporal_inc_real,
+    linewidth = 1, color = "#E41A1C", alpha = 0.5
+  ) +
+  geom_linerange(
+    aes(
+      x = week,
+      ymin = se_low*100, ymax = se_up*100
+    ),
+    data = dt_temporal_inc_real,
+    linewidth = 2.5, color = "#E41A1C", alpha = 0.5
+  ) +
+  geom_point(
+    aes(
+      x = week,
+      y = coef*100,
+      fill = indicator
+    ),
+    data = dt_temporal_inc_real,
+    shape = 21, size = 3, color = "#E41A1C"
+  ) +
+  scale_fill_manual(
+    values = c("significant" = "#E41A1C"),
+    na.value = "white",
+    guide = NULL
+  ) +
+  scale_y_continuous(
+    breaks =c(-50, -25, 0, 25, 50, 75, 100)
+  ) +
+  theme(
+    plot.title.position = "plot",
+    
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "white"),
+    axis.line.x.bottom = element_line(linewidth = con_axis_line*0.5),
+    axis.line.y.left = element_line(linewidth = con_axis_line*0.5),
+    
+    axis.text.y.left = element_text(size = con_axis_text*.pt),
+    axis.title.y.left = element_text(color = "black"),
+    
+    axis.text.x.bottom = element_text(size = con_axis_text*.pt),
+    axis.title = element_text(size = con_axis_title*.pt),
+    plot.title = element_text(size = con_axis_title*.pt, face = "bold")
+  ) +
+  labs(
+    title = "B",
+    x = "Weeks since mobility restriction",
+    y = "Changes in fire incidence (%)"
+  )
+
+#ggsave(
+#  file.path(dir_figs, "fig_s04_b.pdf"),
+#  width = 90, height = 60, units = "mm"
+#)
+```
+
+
+## Real estimates of response curve
+
+
+```{r}
+#| label: real_response
+
+# regression results in country level in figure 2
+dt_coef_country <- readRDS(
+  file.path(dir_data, "Main-3_2_dt_coef_country.rds")
+)
+
+
+#-----------------------1: Panel for spline
+# Oxford dataset: full series from 2020.01.01 to 2020.12.31
+# Mobility index:
+#  - China: full series from 2020.01.01 to 2020.05.02
+#  - World: series (maybe with missing values) from 2020.02.15 to 2020.12.31
+
+panel_spline <- panel_unbalance %>%
+  copy() %>%
+  .[!is.na(intg_oxfordID)] %>%                        # 必须匹配上了牛津政策指数
+  .[!is.na(intg_mobilityID)] %>%                      # 必须匹配上了移动性指数***
+  #.[break_group == "lock-both"] %>%                # 这是新加的,一会儿跑一下试试
+  # transform mobility_SI and mobility_index to original units first
+  .[,
+    `:=`(
+      mobility_SI = mobility_SI / 100,
+      mobility_index = mobility_index / 100
+    )
+  ] %>%
+  # For mobility_SI, there are no NA and negative values during shutdown in 2020, as expected.
+  # And all observations in 2016-2019 or before shutdown in 2020 are set as 0.
+  # But for mobility_index, there are NA (21%) and negative values. We leaves NA alone.
+  # Now we manually set the numbers bigger than 0(1%) as 0, and then 
+  # transform the interval [-100, 0] to [0, 100]
+  .[mobility_index > 0, mobility_index := 0] %>%
+  .[, mobility_index := mobility_index * -1] %>%
+  # spline coordinates for mobility_SI
+  .[, paste0("ns_SI_", 1:4) := as.data.frame(
+        splines::ns(
+          mobility_SI,
+          # SI的分布过于集中在后面了
+          knots = c(50, 80, 95), intercept = FALSE,
+          Boundary.knots = c(0, 100)
+        )
+    )] %>%
+  # essential***
+  .[shutdown_2020 == 0, paste0("ns_SI_", 1:4) := 0] %>%
+  # spline coordinates for mobility_index
+  .[, paste0("ns_mob_", 1:4) := as.data.frame(
+        splines::ns(
+          mobility_index,
+          knots = c(20, 40, 60), intercept = FALSE,
+          Boundary.knots = c(0, 100)
+        )
+    )] %>%
+  # essential***
+  .[shutdown_2020 == 0, paste0("ns_mob_", 1:4) := 0] %>%
+  # for the following linear effect size
+  .[shutdown_2020 == 0, mobility_index := 0]
+
+panel_spline[shutdown_2020 == 1, summary(mobility_index)]
+# Min. 1st Qu.  Median    Mean 3rd Qu.    Max.    NA's 
+# 0.00   24.28   34.28   34.27   44.28   92.68       9
+panel_spline[shutdown_2020 == 1, quantile(mobility_index, probs = seq(0, 1, 0.1), na.rm = TRUE)]
+#   0%   10%   20%   30%   40%   50%   60%   70%   80%   90%  100% 
+# 0.00 13.87 22.42 26.85 29.28 34.28 38.85 41.14 47.14 53.28 92.68
+# 53.28*** account for 90% observations
+
+
+
+#-----------------------2: Overall function
+##---------------2.1 Simple overal response
+func_curve <- function(
+    rawdata,
+    yvar = "actfire_sum",
+    xvar = paste(paste0("ns_mob_", 1:4), collapse = " + "),
+    controls = "+ weather_tempe + weather_tempe_square + weather_winds + weather_preci + weather_RH + weather_VPD",
+    fe = "intg_oxfordID^intg_biome^week + intg_oxfordID^intg_biome^year",
+    vvar = "intg_oxfordID^intg_biome",
+    bd_kts = c(0, 100),
+    kts = c(20, 40, 60),
+    pts = 0:100
+  ){
+  
+  nn <- length(kts) + 1                                           # no intercept
+  
+  #--------------1: Preparation
+  # We have already calculated the spline coordinates for observations
+  # during shutdown period in 2020, with knots at 20, 40 and 60 respectively.
+  
+  ##----1.1 formula
+  fmla_spline <- as.formula(
+    paste(yvar, "~", xvar, controls, "|", fe)
+    )
+  
+  ##----1.2 spline transformation of fixed pts
+  mat_pts <- as.matrix(
+    splines::ns(pts, knots = kts, intercept = FALSE, Boundary.knots = bd_kts)
+  )
+  
+  
+  #--------------2: Regression
+  model_spline <- feglm(
+    fmla_spline,
+    rawdata,
+    family = "poisson",
+    vcov = as.formula(paste0("~", vvar))
+  )
+  
+  
+  #--------------3: Response
+  ##----3.1 coefficients
+  vec_coef <- coef(model_spline)
+  
+  ##----3.2 response
+  dt_response <- data.table(
+    pts = pts,
+    response = as.numeric(mat_pts %*% vec_coef[paste0("ns_mob_", 1:4)]) %>%
+      exp() - 1
+  )
+  
+  
+  return(dt_response)
+  
+}
+
+
+##---------------2.2 Model
+###-----2.2.1 Global curve
+curve_glb <- func_curve(
+  panel_spline
+)
+
+ggplot(data = curve_glb) +
+  geom_line(
+    aes(x = pts, y = response)
+  ) +
+  coord_cartesian(
+    xlim = c(-1, 80), ylim = c(-1, 1)
+  ) +
+  labs(
+    x = "Mobility reduction (%)",
+    y = "Relative changes in active fire",
+    title = "Response curve of active fire in the world"
+  )
+
+###-----2.2.2 Countries with decreased fire
+curve_dec <- func_curve(
+  panel_spline[CountryName %in% dt_coef_country[coef < 0, group_lab]]
+)
+
+ggplot(data = curve_dec) +
+  geom_line(
+    aes(x = pts, y = response)
+  ) +
+  coord_cartesian(
+    xlim = c(-1, 80), ylim = c(-1, 1)
+  ) +
+  labs(
+    x = "Mobility reduction (%)",
+    y = "Relative changes in active fire",
+    title = "Response curve in countries with decreased fires"
+  )
+
+
+###-----2.2.3 Countries with increased fire
+curve_inc <- func_curve(
+  panel_spline[CountryName %in% dt_coef_country[coef > 0, group_lab]]
+)
+
+ggplot(data = curve_inc) +
+  geom_line(
+    aes(x = pts, y = response)
+  ) +
+  coord_cartesian(
+    xlim = c(-1, 80), ylim = c(-1, 1)
+  ) +
+  labs(
+    x = "Mobility reduction (%)",
+    y = "Relative changes in active fire",
+    title = "Response curve in countries with increased fires"
+  )
+
+
+
+#-----------------------3: Bootstrap regression
+bootspline_mob <- function(
+    rawdata,
+    boot = 1000,
+    seed = 182,
+    yvar = "actfire_sum",
+    xvar = paste(paste0("ns_mob_", 1:4), collapse = " + "),
+    controls = "+ weather_tempe + weather_tempe_square + weather_winds + weather_preci + weather_RH + weather_VPD",
+    fe = "intg_oxfordID^intg_biome^week + intg_oxfordID^intg_biome^year",
+    vvar = "intg_oxfordID^intg_biome",
+    bd_kts = c(0, 100),
+    kts = c(20, 40, 60),
+    pts = 0:100
+  ) {
+  
+  nn <- length(kts) + 1                                           # no intercept
+  
+  #--------------1: Preparation
+  # We have already calculated the spline coordinates for observations
+  # during shutdown period in 2020, with knots at 20, 40 and 60 respectively.
+  
+  ##----1.1 formula
+  fmla_spline <- as.formula(
+    paste(yvar, "~", xvar, controls, "|", fe)
+    )
+  
+  ##----1.2 spline transformation of fixed pts
+  mat_pts <- as.matrix(
+    splines::ns(pts, knots = kts, intercept = FALSE, Boundary.knots = bd_kts)
+  )
+  
+  
+  #--------------2: Bootstrap
+  set.seed(seed)
+  out_response_glb <- out_response_dec <- out_response_inc <- c()
+  
+  for (ii in 1:boot) {
+    
+    ##--2.1 make panel for each iteration
+    ## sample intg_oxfordID with replacement
+    samp <- data.table(
+      unit = rawdata[,
+        base::sample(
+          x = unique(intg_oxfordID),
+          size = length(unique(intg_oxfordID)),
+          replace = TRUE
+        )
+      ]
+    )
+    
+    ## join resampled intg_oxfordID
+    sub_boot <- rawdata %>%
+      merge(
+        samp,
+        by.x = "intg_oxfordID",  by.y = "unit",
+        all = FALSE,  sort = FALSE,
+        allow.cartesian = TRUE                        # allow duplicate joins***
+      )
+    
+    ##--2.2 overall response
+    model_spline_glb <- feglm(
+      fmla_spline,
+      sub_boot,
+      family = "poisson",
+      vcov = as.formula(paste0("~", vvar))
+    )
+    vec_coef_glb <- coef(model_spline_glb)[paste0("ns_mob_", 1:4)]
+    vec_response_glb <- as.numeric(mat_pts %*% vec_coef_glb)
+    out_response_glb <- cbind(out_response_glb, vec_response_glb)
+    
+    ##--2.3 countries with decreased fire
+    model_spline_dec <- feglm(
+      fmla_spline,
+      sub_boot[CountryName %in% dt_coef_country[coef < 0, group_lab]],
+      family = "poisson",
+      vcov = as.formula(paste0("~", vvar))
+    )
+    vec_coef_dec <- coef(model_spline_dec)[paste0("ns_mob_", 1:4)]
+    vec_response_dec <- as.numeric(mat_pts %*% vec_coef_dec)
+    out_response_dec <- cbind(out_response_dec, vec_response_dec)
+
+    ###-----2.2.3 Countries with increased fire
+    model_spline_inc <- feglm(
+      fmla_spline,
+      sub_boot[CountryName %in% dt_coef_country[coef > 0, group_lab]],
+      family = "poisson",
+      vcov = as.formula(paste0("~", vvar))
+    )
+    vec_coef_inc <- coef(model_spline_inc)[paste0("ns_mob_", 1:4)]
+    vec_response_inc <- as.numeric(mat_pts %*% vec_coef_inc)
+    out_response_inc <- cbind(out_response_inc, vec_response_inc)
+    
+    
+    print(paste0(ii, " is done."))
+  }
+  
+  df_response_glb <- data.frame(pts, out_response_glb)
+  df_response_dec <- data.frame(pts, out_response_dec)
+  df_response_inc <- data.frame(pts, out_response_inc)
+  
+  list_all <- list(df_response_glb, df_response_dec, df_response_inc)
+  return(list_all)
+}
+
+# 时间测试
+#tt <- Sys.time()
+#list_spline <- bootspline_mob(
+#  panel_spline,
+#  boot = 10
+#)
+#print(Sys.time() - tt)
+# 10个循环, 用时为15.29131 mins.
+# 那么换算到1000个循环, 用时约为26小时.
+# 显示有缺失值是因为编号为904的移动性ID.
+# 其匹配上的移动性数据是第7周以后才有的, 但根据政策数据第4周就发生了封锁
+# 所以有一个mobility在2020年封锁时段内缺失数据的情况, 影响不大.
+
+# 具体执行文件见Fire文件夹下的Main-3_2_bootstrap_mob.R.
+#tt <- Sys.time()
+#list_spline <- bootspline_mob(
+#  panel_spline
+#)
+#print(Sys.time() - tt)                                         # 21.37024 hours
+#saveRDS(list_spline, file.path(dir_data, "Main-3_2_bootstrap_curve.rds"))
+
+```
+
+
+## Placebo estimates of response curve
+
+
+```{r}
+#| label: placebo_response
+
+# regression results in country level in figure 2
+dt_coef_country <- readRDS(
+  file.path(dir_data, "Main-3_2_dt_coef_country.rds")
+)
+
+
+#-----------------------1: Panel for spline
+# Oxford dataset: full series from 2020.01.01 to 2020.12.31
+# Mobility index:
+#  - China: full series from 2020.01.01 to 2020.05.02
+#  - World: series (maybe with missing values) from 2020.02.15 to 2020.12.31
+
+panel_spline <- panel_unbalance %>%
+  copy() %>%
+  .[!is.na(intg_oxfordID)] %>%                        # 必须匹配上了牛津政策指数
+  .[!is.na(intg_mobilityID)] %>%                      # 必须匹配上了移动性指数***
+  #.[break_group == "lock-both"] %>%                # 这是新加的,一会儿跑一下试试
+  # transform mobility_SI and mobility_index to original units first
+  .[,
+    `:=`(
+      mobility_SI = mobility_SI / 100,
+      mobility_index = mobility_index / 100
+    )
+  ] %>%
+  # For mobility_SI, there are no NA and negative values during shutdown in 2020, as expected.
+  # And all observations in 2016-2019 or before shutdown in 2020 are set as 0.
+  # But for mobility_index, there are NA (21%) and negative values. We leaves NA alone.
+  # Now we manually set the numbers bigger than 0(1%) as 0, and then 
+  # transform the interval [-100, 0] to [0, 100]
+  .[mobility_index > 0, mobility_index := 0] %>%
+  .[, mobility_index := mobility_index * -1] %>%
+  # spline coordinates for mobility_SI
+  .[, paste0("ns_SI_", 1:4) := as.data.frame(
+        splines::ns(
+          mobility_SI,
+          # SI的分布过于集中在后面了
+          knots = c(50, 80, 95), intercept = FALSE,
+          Boundary.knots = c(0, 100)
+        )
+    )] %>%
+  # essential***
+  .[shutdown_2020 == 0, paste0("ns_SI_", 1:4) := 0] %>%
+  # spline coordinates for mobility_index
+  .[, paste0("ns_mob_", 1:4) := as.data.frame(
+        splines::ns(
+          mobility_index,
+          knots = c(20, 40, 60), intercept = FALSE,
+          Boundary.knots = c(0, 100)
+        )
+    )] %>%
+  # essential***
+  .[shutdown_2020 == 0, paste0("ns_mob_", 1:4) := 0]
+
+panel_spline[shutdown_2020 == 1, summary(mobility_index)]
+# Min. 1st Qu.  Median    Mean 3rd Qu.    Max.    NA's 
+# 0.00   24.28   34.28   34.27   44.28   92.68       9
+panel_spline[shutdown_2020 == 1, quantile(mobility_index, probs = seq(0, 1, 0.1), na.rm = TRUE)]
+#   0%   10%   20%   30%   40%   50%   60%   70%   80%   90%  100% 
+# 0.00 13.87 22.42 26.85 29.28 34.28 38.85 41.14 47.14 53.28 92.68
+# 53.28*** account for 90% observations
+
+
+
+#-----------------------2: Placebo regression
+placebo_curve <- function(
+    rawdata,
+    boot = 1000,
+    seed = 182,
+    yvar = "actfire_sum",
+    xvar = paste(paste0("pl_mob_", 1:4), collapse = " + "),
+    controls = "+ weather_tempe + weather_tempe_square + weather_winds + weather_preci + weather_RH + weather_VPD",
+    fe = "intg_oxfordID^intg_biome^week + intg_oxfordID^intg_biome^year",
+    vvar = "intg_oxfordID^intg_biome",
+    bd_kts = c(0, 100),
+    kts = c(20, 40, 60),
+    pts = 0:100
+) {
+  
+  nn <- length(kts) + 1                                           # no intercept
+  
+  #--------------1: Preparation
+  # We have already calculated the spline coordinates for observations
+  # during shutdown period in 2020, with knots at 20, 40 and 60 respectively.
+  
+  ##----1.1 formula
+  fmla_spline <- as.formula(
+    paste(yvar, "~", xvar, controls, "|", fe)
+  )
+  
+  ##----1.2 spline transformation of fixed pts
+  mat_pts <- as.matrix(
+    splines::ns(pts, knots = kts, intercept = FALSE, Boundary.knots = bd_kts)
+  )
+  
+  ##----1.3 Original data.table with just oxford admin
+  # Here we permute by intg_oxfordID
+  dt_raw <- data.table(
+    intg_oxfordID = rawdata[, unique(intg_oxfordID)]
+  )
+  # ns_2020_1:4
+  panel_2020 <- rawdata %>%
+    .[year == 2020] %>%
+    .[, .(id, week, ns_mob_1, ns_mob_2, ns_mob_3, ns_mob_4)] %>%
+    setnames(
+      old = paste0("ns_mob_", 1:4),
+      new = paste0("ns_2020_", 1:4)
+    )
+  panel_here <- rawdata %>%
+    copy() %>%
+    .[, paste0("ns_mob_", 1:4) := NULL] %>%
+    merge(
+      panel_2020,
+      by = c("id", "week"),
+      all = FALSE, sort = FALSE
+    )
+  
+  
+  #--------------2: Permuted assignment
+  set.seed(seed)
+  out_response_glb <- out_response_dec <- out_response_inc <- c()
+  
+  for (ii in 1:boot) {
+    
+    ##-- randomly assign treatment year within each intg_oxfordID
+    dt_treat <- dt_raw %>%
+      copy() %>%
+      .[,
+        pl_year := cut(
+          x = runif(.N),
+          breaks = c(0, 0.25, 0.5, 0.75, 1),
+          include.lowest = TRUE,
+          labels = c("2016", "2017", "2018", "2019")
+        ) %>% as.character() %>% as.integer()
+      ]
+    
+    ##-- join data.table and set "pl_mob_1:4"
+    pl_panel <- panel_here %>%
+      copy() %>%
+      .[year <= 2019] %>%
+      merge(
+        dt_treat, by = "intg_oxfordID",
+        all = FALSE, sort = FALSE
+      ) %>%
+      # pl_mob_1:4 work as modeling variables
+      .[, paste0("pl_mob_", 1:4) := 0] %>%                        # 0 as default
+      # 1) randomly assgin treatment year at the oxford_admin level
+      # 2) inherent specific identification results at the pixel level
+      .[year == pl_year,
+        paste0("pl_mob_", 1:4) := .(
+          ns_2020_1, ns_2020_2, ns_2020_3, ns_2020_4
+        )
+      ]
+    
+    ##-- overall response
+    model_spline_glb <- feglm(
+      fmla_spline,
+      pl_panel,
+      family = "poisson",
+      vcov = as.formula(paste0("~", vvar))
+    )
+    vec_coef_glb <- coef(model_spline_glb)[paste0("pl_mob_", 1:4)]
+    vec_response_glb <- as.numeric(mat_pts %*% vec_coef_glb)
+    out_response_glb <- cbind(out_response_glb, vec_response_glb)
+    
+    ##-- countries with decreased fire
+    model_spline_dec <- feglm(
+      fmla_spline,
+      pl_panel[CountryName %in% dt_coef_country[coef < 0, group_lab]],
+      family = "poisson",
+      vcov = as.formula(paste0("~", vvar))
+    )
+    vec_coef_dec <- coef(model_spline_dec)[paste0("pl_mob_", 1:4)]
+    vec_response_dec <- as.numeric(mat_pts %*% vec_coef_dec)
+    out_response_dec <- cbind(out_response_dec, vec_response_dec)
+
+    ###-- countries with increased fire
+    model_spline_inc <- feglm(
+      fmla_spline,
+      pl_panel[CountryName %in% dt_coef_country[coef > 0, group_lab]],
+      family = "poisson",
+      vcov = as.formula(paste0("~", vvar))
+    )
+    vec_coef_inc <- coef(model_spline_inc)[paste0("pl_mob_", 1:4)]
+    vec_response_inc <- as.numeric(mat_pts %*% vec_coef_inc)
+    out_response_inc <- cbind(out_response_inc, vec_response_inc)
+    
+    
+    print(paste0(ii, " is done."))
+  }
+  
+  df_response_glb <- data.frame(pts, out_response_glb)
+  df_response_dec <- data.frame(pts, out_response_dec)
+  df_response_inc <- data.frame(pts, out_response_inc)
+  
+  list_all <- list(df_response_glb, df_response_dec, df_response_inc)
+  return(list_all)
+  
+}
+
+# 时间测试
+#tt <- Sys.time()
+#list_placebo_curve <- placebo_curve(
+#  panel_spline,
+#  boot = 10
+#)
+#print(Sys.time() - tt)
+# 10个循环, 用时为??.
+# 那么换算到1000个循环, 用时约为??.
+# 显示有缺失值是因为编号为904的移动性ID.
+# 其匹配上的移动性数据是第7周以后才有的, 但根据政策数据第4周就发生了封锁
+# 所以有一个mobility在2020年封锁时段内缺失数据的情况, 影响不大.
+
+# 具体执行文件见Fire文件夹下的Main-3_2_placebo_curve.R.
+#tt <- Sys.time()
+#list_placebo_curve <- placebo_curve(
+#  panel_spline
+#)
+#print(Sys.time() - tt)                                          # 17.0731 hours
+#saveRDS(list_placebo_curve, file.path(dir_data, "Main-3_2_placebo_curve.rds"))
+
+```
+
+
+## C - Response of countries with decreased fire
+
+
+```{r}
+#| label: response_decrease
+
+
+#-----------------------1: Placebo coefficients
+# Original palcebo estimates
+raw_response_dec_placebo <- readRDS(
+  file.path(dir_data, "Main-3_2_placebo_curve.rds")
+)[[2]]
+
+# We need to exponent these original coefficients at first.
+# Note that samples start from column 2.
+df_response_dec_placebo <- data.frame(
+  pts = raw_response_dec_placebo[, "pts"],
+  average = apply(
+    raw_response_dec_placebo[, 2:dim(raw_response_dec_placebo)[2]], 1,
+    function(x){exp(mean(x)) - 1}
+  ),
+  CI_low = apply(
+    raw_response_dec_placebo[, 2:dim(raw_response_dec_placebo)[2]], 1,
+    function(x){exp(quantile(x, probs = 0.025)) - 1}
+  ),
+  CI_up = apply(
+    raw_response_dec_placebo[, 2:dim(raw_response_dec_placebo)[2]], 1,
+    function(x){exp(quantile(x, probs = 0.975)) - 1}
+  ),
+  se_low = apply(
+    raw_response_dec_placebo[, 2:dim(raw_response_dec_placebo)[2]], 1,
+    function(x){exp(mean(x) - sd(x)) - 1}
+  ),
+  se_up = apply(
+    raw_response_dec_placebo[, 2:dim(raw_response_dec_placebo)[2]], 1,
+    function(x){exp(mean(x) + sd(x)) - 1}
+  )
+)
+
+
+
+#-----------------------2: Bootstrap coefficients
+# rawdf contains initial simulated values.
+# Now we extract the 95%CI and mean, return these summary statistics.
+raw_response_dec_real <- readRDS(
+  file.path(dir_data, "Main-3_2_bootstrap_curve.rds")
+)[[2]]
+
+# We need to exponent these original coefficients at first.
+df_response_dec_real <- data.frame(
+  pts = raw_response_dec_real[, "pts"],
+  average = apply(
+    raw_response_dec_real[, 2:dim(raw_response_dec_real)[2]], 1,
+    function(x){exp(mean(x)) - 1}
+  ),
+  CI_low = apply(
+    raw_response_dec_real[, 2:dim(raw_response_dec_real)[2]], 1,
+    function(x){exp(quantile(x, probs = 0.025)) - 1}
+  ),
+  CI_up = apply(
+    raw_response_dec_real[, 2:dim(raw_response_dec_real)[2]], 1,
+    function(x){exp(quantile(x, probs = 0.975)) - 1}
+  ),
+  se_low = apply(
+    raw_response_dec_real[, 2:dim(raw_response_dec_real)[2]], 1,
+    function(x){exp(mean(x) - sd(x)) - 1}
+  ),
+  se_up = apply(
+    raw_response_dec_real[, 2:dim(raw_response_dec_real)[2]], 1,
+    function(x){exp(mean(x) + sd(x)) - 1}
+  )
+)
+
+
+
+#-----------------------3: Sample distribution
+##---------------3.1 processed data
+# regression results in country level in figure 2
+dt_coef_country <- readRDS(
+  file.path(dir_data, "Main-3_2_dt_coef_country.rds")
+)
+
+# Panel for spline
+# Oxford dataset: full series from 2020.01.01 to 2020.12.31
+# Mobility index:
+#  - China: full series from 2020.01.01 to 2020.05.02
+#  - World: series (maybe with missing values) from 2020.02.15 to 2020.12.31
+panel_spline <- panel_unbalance %>%
+  copy() %>%
+  .[!is.na(intg_oxfordID)] %>%                        # 必须匹配上了牛津政策指数
+  .[!is.na(intg_mobilityID)] %>%                      # 必须匹配上了移动性指数***
+  #.[break_group == "lock-both"] %>%                # 这是新加的,一会儿跑一下试试
+  # transform mobility_SI and mobility_index to original units first
+  .[,
+    `:=`(
+      mobility_SI = mobility_SI / 100,
+      mobility_index = mobility_index / 100
+    )
+  ] %>%
+  # For mobility_SI, there are no NA and negative values during shutdown in 2020, as expected.
+  # And all observations in 2016-2019 or before shutdown in 2020 are set as 0.
+  # But for mobility_index, there are NA (21%) and negative values. We leaves NA alone.
+  # Now we manually set the numbers bigger than 0(1%) as 0, and then 
+  # transform the interval [-100, 0] to [0, 100]
+  .[mobility_index > 0, mobility_index := 0] %>%
+  .[, mobility_index := mobility_index * -1] %>%
+  # spline coordinates for mobility_SI
+  .[, paste0("ns_SI_", 1:4) := as.data.frame(
+        splines::ns(
+          mobility_SI,
+          # SI的分布过于集中在后面了
+          knots = c(50, 80, 95), intercept = FALSE,
+          Boundary.knots = c(0, 100)
+        )
+    )] %>%
+  # essential***
+  .[shutdown_2020 == 0, paste0("ns_SI_", 1:4) := 0] %>%
+  # spline coordinates for mobility_index
+  .[, paste0("ns_mob_", 1:4) := as.data.frame(
+        splines::ns(
+          mobility_index,
+          knots = c(20, 40, 60), intercept = FALSE,
+          Boundary.knots = c(0, 100)
+        )
+    )] %>%
+  # essential***
+  .[shutdown_2020 == 0, paste0("ns_mob_", 1:4) := 0]
+
+
+##---------------3.2 sample numbers in each bin
+# extract sample numbers in each bin for the histogram.
+# set 1 as binwidth, from 0 to 100.
+
+dt_number <- panel_spline %>%
+  .[CountryName %in% dt_coef_country[coef < 0, group_lab]] %>%
+  .[shutdown_2020 == 1] %>%
+  # classify into intervals and type labels
+  .[,
+    interval := cut(
+      mobility_index,
+      breaks = seq(-0.5, 100.5, 1),
+      labels = as.character(seq(0, 100, 1))
+    )
+  ] %>%
+  # count numbers in each interval
+  .[,
+    .(count = .N),
+    by = "interval"
+  ] %>%
+  .[, frequency := count/sum(count, na.rm = TRUE)] %>%
+  .[order(interval)]
+# set the frequency as the vertical height of each interval,
+# while an interval needs two vertical lines at behind and after.
+dt_before <- dt_number %>%
+  .[interval != "0"] %>%    # exclude interval 0 to avoid conflict in histograms
+  copy() %>%
+  .[,
+    `:=`(
+      position = as.numeric(as.character(interval)) - 0.5,
+      order = "a"
+    )
+  ]
+dt_after <- dt_number %>%
+  .[interval != "0"] %>%    # exclude interval 0 to avoid conflict in histograms
+  copy() %>%
+  .[,
+    `:=`(
+      position = as.numeric(as.character(interval)) + 0.5,
+      order = "b"
+    )
+  ]
+# for the final geom_path
+dt_bins <- dt_before %>%
+  rbind(dt_after) %>%
+  .[order(interval, order)] %>%
+  # assign the base height and multiply factor
+  .[,
+    `:=`(
+      scale_frequency = -80 + 120*frequency,
+      scale_base = -80
+    )
+  ]
+# for the final geom_segment and geom_path
+dt_obs_vertical <- dt_bins %>%
+  # only keep a vertical line with max height in each position
+  .[order(position, -frequency)] %>%
+  .[, .SD[1], by = "position"]
+
+
+
+#-----------------------3: Plot
+ggplot() +
+  # placebo estimates of response curve
+  geom_ribbon(
+    aes(
+      x = pts,
+      ymin = CI_low*100, ymax = CI_up*100
+    ),
+    data = df_response_dec_placebo,
+    fill = "grey",
+    alpha = 0.15
+  ) +
+  geom_ribbon(
+    aes(
+      x = pts,
+      ymin = se_low*100, ymax = se_up*100
+    ),
+    data = df_response_dec_placebo,
+    fill = "grey",
+    alpha = 0.30
+  ) +
+  geom_line(
+    aes(
+      x = pts, y = average * 100
+    ),
+    data = df_response_dec_placebo,
+    color = "grey60",
+    linewidth = 0.5
+  ) +
+  # auxiliary line and point
+  geom_hline(yintercept = 0, linetype = "dashed", color = "#984EA3") +
+  # bootstrap estimates of response curve
+  geom_ribbon(
+    aes(
+      x = pts,
+      ymin = CI_low*100, ymax = CI_up*100
+    ),
+    data = df_response_dec_real,
+    fill = "steelblue1", alpha = 0.1
+  ) +
+  geom_ribbon(
+    aes(
+      x = pts,
+      ymin = se_low*100, ymax = se_up*100
+    ),
+    data = df_response_dec_real,
+    fill = "steelblue1", alpha = 0.2
+  ) +
+  geom_line(
+    aes(
+      x = pts,
+      y = average*100
+    ),
+    data = df_response_dec_real,
+    color = "#377EB8", linewidth = 0.8
+  ) +
+  geom_segment(
+    aes(
+      x = position, xend = position,
+      y = scale_base, yend = scale_frequency
+    ),
+    data = dt_obs_vertical,
+    linewidth = 0.15
+  ) +
+  geom_path(
+    aes(x = position, y = scale_frequency),
+    data = dt_bins,
+    linewidth = 0.15
+  ) +
+  theme(
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "white"),
+    
+    axis.line.x.bottom = element_line(linewidth = con_axis_line*0.5),
+    axis.line.y.left = element_line(linewidth = con_axis_line*0.5),
+    
+    plot.title.position = "plot",
+    
+    axis.text = element_text(size = con_axis_text*.pt),
+    axis.title = element_text(size = con_axis_title*.pt),
+    plot.title = element_text(size = con_plot_title*.pt, face = "bold"),
+    plot.subtitle = element_text(size = con_plot_title*.pt)
+  ) +
+  scale_x_continuous(
+    name = "Mobility reduction (%)",
+    limits = c(0, 55.5),
+    breaks = seq(0, 50, 10)
+  ) +
+  scale_y_continuous(
+    name = "Response of fire incidence (%)",
+    breaks = seq(-60, 20, 20)
+  ) +
+  coord_cartesian(
+    ylim = c(-80, 40), xlim = c(0, 55.5),
+    expand = FALSE
+  ) +
+  labs(
+    title = "C"
+  )
+
+#ggsave(
+#  file.path(dir_figs, "fig_s04_c.pdf"),
+#  width = 90, height = 60, units = "mm"
+#)
+
+```
+
+
+## D - Response of countries with increased fire
+
+
+```{r}
+#| label: response_increase
+
+#-----------------------1: Placebo coefficients
+# Original palcebo estimates
+raw_response_inc_placebo <- readRDS(
+  file.path(dir_data, "Main-3_2_placebo_curve.rds")
+)[[3]]
+
+# We need to exponent these original coefficients at first.
+# Note that samples start from column 2.
+df_response_inc_placebo <- data.frame(
+  pts = raw_response_inc_placebo[, "pts"],
+  average = apply(
+    raw_response_inc_placebo[, 2:dim(raw_response_inc_placebo)[2]], 1,
+    function(x){exp(mean(x)) - 1}
+  ),
+  CI_low = apply(
+    raw_response_inc_placebo[, 2:dim(raw_response_inc_placebo)[2]], 1,
+    function(x){exp(quantile(x, probs = 0.025)) - 1}
+  ),
+  CI_up = apply(
+    raw_response_inc_placebo[, 2:dim(raw_response_inc_placebo)[2]], 1,
+    function(x){exp(quantile(x, probs = 0.975)) - 1}
+  ),
+  se_low = apply(
+    raw_response_inc_placebo[, 2:dim(raw_response_inc_placebo)[2]], 1,
+    function(x){exp(mean(x) - sd(x)) - 1}
+  ),
+  se_up = apply(
+    raw_response_inc_placebo[, 2:dim(raw_response_inc_placebo)[2]], 1,
+    function(x){exp(mean(x) + sd(x)) - 1}
+  )
+)
+
+
+
+#-----------------------2: Bootstrap coefficients
+# rawdf contains initial simulated values.
+# Now we extract the 95%CI and mean, return these summary statistics.
+raw_response_inc_real <- readRDS(
+  file.path(dir_data, "Main-3_2_bootstrap_curve.rds")
+)[[3]]
+
+# We need to exponent these original coefficients at first.
+df_response_inc_real <- data.frame(
+  pts = raw_response_inc_real[, "pts"],
+  average = apply(
+    raw_response_inc_real[, 2:dim(raw_response_inc_real)[2]], 1,
+    function(x){exp(mean(x)) - 1}
+  ),
+  CI_low = apply(
+    raw_response_inc_real[, 2:dim(raw_response_inc_real)[2]], 1,
+    function(x){exp(quantile(x, probs = 0.025)) - 1}
+  ),
+  CI_up = apply(
+    raw_response_inc_real[, 2:dim(raw_response_inc_real)[2]], 1,
+    function(x){exp(quantile(x, probs = 0.975)) - 1}
+  ),
+  se_low = apply(
+    raw_response_inc_real[, 2:dim(raw_response_inc_real)[2]], 1,
+    function(x){exp(mean(x) - sd(x)) - 1}
+  ),
+  se_up = apply(
+    raw_response_inc_real[, 2:dim(raw_response_inc_real)[2]], 1,
+    function(x){exp(mean(x) + sd(x)) - 1}
+  )
+)
+
+
+
+#-----------------------3: Sample distribution
+##---------------3.1 processed data
+# regression results in country level in figure 2
+dt_coef_country <- readRDS(
+  file.path(dir_data, "Main-3_2_dt_coef_country.rds")
+)
+
+# Panel for spline
+# Oxford dataset: full series from 2020.01.01 to 2020.12.31
+# Mobility index:
+#  - China: full series from 2020.01.01 to 2020.05.02
+#  - World: series (maybe with missing values) from 2020.02.15 to 2020.12.31
+panel_spline <- panel_unbalance %>%
+  copy() %>%
+  .[!is.na(intg_oxfordID)] %>%                        # 必须匹配上了牛津政策指数
+  .[!is.na(intg_mobilityID)] %>%                      # 必须匹配上了移动性指数***
+  #.[break_group == "lock-both"] %>%                # 这是新加的,一会儿跑一下试试
+  # transform mobility_SI and mobility_index to original units first
+  .[,
+    `:=`(
+      mobility_SI = mobility_SI / 100,
+      mobility_index = mobility_index / 100
+    )
+  ] %>%
+  # For mobility_SI, there are no NA and negative values during shutdown in 2020, as expected.
+  # And all observations in 2016-2019 or before shutdown in 2020 are set as 0.
+  # But for mobility_index, there are NA (21%) and negative values. We leaves NA alone.
+  # Now we manually set the numbers bigger than 0(1%) as 0, and then 
+  # transform the interval [-100, 0] to [0, 100]
+  .[mobility_index > 0, mobility_index := 0] %>%
+  .[, mobility_index := mobility_index * -1] %>%
+  # spline coordinates for mobility_SI
+  .[, paste0("ns_SI_", 1:4) := as.data.frame(
+        splines::ns(
+          mobility_SI,
+          # SI的分布过于集中在后面了
+          knots = c(50, 80, 95), intercept = FALSE,
+          Boundary.knots = c(0, 100)
+        )
+    )] %>%
+  # essential***
+  .[shutdown_2020 == 0, paste0("ns_SI_", 1:4) := 0] %>%
+  # spline coordinates for mobility_index
+  .[, paste0("ns_mob_", 1:4) := as.data.frame(
+        splines::ns(
+          mobility_index,
+          knots = c(20, 40, 60), intercept = FALSE,
+          Boundary.knots = c(0, 100)
+        )
+    )] %>%
+  # essential***
+  .[shutdown_2020 == 0, paste0("ns_mob_", 1:4) := 0]
+
+
+##---------------3.2 sample numbers in each bin
+# extract sample numbers in each bin for the histogram.
+# set 1 as binwidth, from 0 to 100.
+
+dt_number <- panel_spline %>%
+  .[CountryName %in% dt_coef_country[coef > 0, group_lab]] %>%
+  .[shutdown_2020 == 1] %>%
+  # classify into intervals and type labels
+  .[,
+    interval := cut(
+      mobility_index,
+      breaks = seq(-0.5, 100.5, 1),
+      labels = as.character(seq(0, 100, 1))
+    )
+  ] %>%
+  # count numbers in each interval
+  .[,
+    .(count = .N),
+    by = "interval"
+  ] %>%
+  .[, frequency := count/sum(count, na.rm = TRUE)] %>%
+  .[order(interval)]
+# set the frequency as the vertical height of each interval,
+# while an interval needs two vertical lines at behind and after.
+dt_before <- dt_number %>%
+  .[interval != "0"] %>%    # exclude interval 0 to avoid conflict in histograms
+  copy() %>%
+  .[,
+    `:=`(
+      position = as.numeric(as.character(interval)) - 0.5,
+      order = "a"
+    )
+  ]
+dt_after <- dt_number %>%
+  .[interval != "0"] %>%    # exclude interval 0 to avoid conflict in histograms
+  copy() %>%
+  .[,
+    `:=`(
+      position = as.numeric(as.character(interval)) + 0.5,
+      order = "b"
+    )
+  ]
+# for the final geom_path
+dt_bins <- dt_before %>%
+  rbind(dt_after) %>%
+  .[order(interval, order)] %>%
+  # assign the base height and multiply factor
+  .[,
+    `:=`(
+      scale_frequency = -22 + 120*frequency,
+      scale_base = -22
+    )
+  ]
+# for the final geom_segment and geom_path
+dt_obs_vertical <- dt_bins %>%
+  # only keep a vertical line with max height in each position
+  .[order(position, -frequency)] %>%
+  .[, .SD[1], by = "position"]
+
+
+
+#-----------------------3: Plot
+ggplot() +
+  # placebo estimates of response curve
+  geom_ribbon(
+    aes(
+      x = pts,
+      ymin = CI_low*100, ymax = CI_up*100
+    ),
+    data = df_response_inc_placebo,
+    fill = "grey",
+    alpha = 0.15
+  ) +
+  geom_ribbon(
+    aes(
+      x = pts,
+      ymin = se_low*100, ymax = se_up*100
+    ),
+    data = df_response_inc_placebo,
+    fill = "grey",
+    alpha = 0.30
+  ) +
+  geom_line(
+    aes(
+      x = pts, y = average * 100
+    ),
+    data = df_response_inc_placebo,
+    color = "grey60",
+    linewidth = 0.5
+  ) +
+  # auxiliary line and point
+  geom_hline(yintercept = 0, linetype = "dashed", color = "#984EA3") +
+  # bootstrap estimates of response curve
+  geom_ribbon(
+    aes(
+      x = pts,
+      ymin = CI_low*100, ymax = CI_up*100
+    ),
+    data = df_response_inc_real,
+    fill = "indianred1", alpha = 0.1
+  ) +
+  geom_ribbon(
+    aes(
+      x = pts,
+      ymin = se_low*100, ymax = se_up*100
+    ),
+    data = df_response_inc_real,
+    fill = "indianred1", alpha = 0.2
+  ) +
+  geom_line(
+    aes(
+      x = pts,
+      y = average*100
+    ),
+    data = df_response_inc_real,
+    color = "#E41A1C", linewidth = 0.8
+  ) +
+  geom_segment(
+    aes(
+      x = position, xend = position,
+      y = scale_base, yend = scale_frequency
+    ),
+    data = dt_obs_vertical,
+    linewidth = 0.15
+  ) +
+  geom_path(
+    aes(x = position, y = scale_frequency),
+    data = dt_bins,
+    linewidth = 0.15
+  ) +
+  theme(
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "white"),
+    
+    axis.line.x.bottom = element_line(linewidth = con_axis_line*0.5),
+    axis.line.y.left = element_line(linewidth = con_axis_line*0.5),
+    
+    plot.title.position = "plot",
+    
+    axis.text = element_text(size = con_axis_text*.pt),
+    axis.title = element_text(size = con_axis_title*.pt),
+    plot.title = element_text(size = con_plot_title*.pt, face = "bold"),
+    plot.subtitle = element_text(size = con_plot_title*.pt)
+  ) +
+  scale_x_continuous(
+    name = "Mobility reduction (%)",
+    limits = c(0, 55.5),
+    breaks = seq(0, 50, 10)
+  ) +
+  scale_y_continuous(
+    name = "Response of fire incidence (%)",
+    breaks = seq(-20, 80, 20)
+  ) +
+  coord_cartesian(
+    ylim = c(-22, 85), xlim = c(0, 55.5),
+    expand = FALSE
+  ) +
+  labs(
+    title = "D"
+  )
+
+#ggsave(
+#  file.path(dir_figs, "fig_s04_d.pdf"),
+#  width = 90, height = 60, units = "mm"
+#)
+```
+
+
+# Figure S05
+
+Spatial distribution for variables in figure 4: landcover, protected area, footpirnt index. Use the raster data aggregated at 0.1 degree.
+
+```{r}
+#| label: fig_s05
+
+#-----------------------1: Landcover
+#library(ggsci)
+#library(scales)
+#ggsci::pal_nejm("default")(8)
+#scales::show_col(ggsci::pal_nejm("default")(8))
+# 0,        1,        2,              3,        4
+# Other,    Forest,   Shrub/Savanna,  Grass,    Cropland
+# #BC3C29,  #7876B1,  #0072B5,        #20854E,  #E18727
+
+landcover_MCD12C1 <- rast(
+  file.path(
+    dir_input,
+    "data_process/Landcover/landcover_MCD12C1_5_pt1.tif"
+  )
+)
+# Note that water bodies is classifed into "others" in the original raster.
+landcover_MCD12C1 <- landcover_MCD12C1 %>%
+  terra::mask(
+    vect(world_rel)
+  )
+
+p1 <- ggplot() +
+  geom_spatraster(
+    data = landcover_MCD12C1,
+    maxcell = dim(landcover_MCD12C1)[1] * dim(landcover_MCD12C1)[2]
+  ) +
+  scale_fill_manual(
+    name = "Vegetation type",
+    limits = c("Forest", "Shrub/Savanna", "Grass", "Cropland", "Other"),
+    values = c("#7876B1", "#0072B5", "#20854E", "#E18727", "#BC3C29"),
+    #na.value = "grey80",
+    na.value = "#C3E8F9",                                            # sea color
+    guide = guide_legend(
+      title.position = "top", title.hjust = 0.5,
+      nrow = 1#, label.position = "bottom"
+    )
+  ) +
+  geom_sf(
+    data = world_rel, fill = NA,
+    color = "black", linewidth = 0.2
+  ) +
+  scale_x_continuous(
+    expand = expansion(add = 0)
+  ) +
+  scale_y_continuous(
+    limits = c(-57, 83),
+    expand = expansion(add = 0)
+  ) +
+  theme(
+    panel.grid = element_blank(),
+    panel.background = element_blank(),
+    panel.border = element_rect(fill = NA, color = "black", linewidth = 0.2),
+    
+    legend.position = "bottom",
+    legend.key.size = unit(con_axis_text*1.5, "mm"),
+    legend.key = element_rect(color = "black", linewidth = 0.5),
+    legend.box.spacing = unit(0, "mm"),   # shrink interspace between legend and panel
+    legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "mm"),
+    
+    plot.margin = margin(t = 0, r = 1, b = 0, l = 1, unit = "mm"),
+    
+    plot.title = element_text(size = con_axis_title*.pt, face = "bold"),
+    plot.title.position = "plot",
+    axis.text = element_text(size = con_axis_text*.pt),
+    legend.title = element_text(size = con_axis_title*.pt),
+    legend.text = element_text(size = con_axis_text*.pt)
+  ) +
+  labs(
+    x = NULL,
+    y = NULL,
+    title = "A"
+  )
+
+#ggsave(
+#  file.path(dir_figs, "fig_s05_p1.pdf"),
+#  p1,
+#  width = 160, height = 80, units = "mm"
+#)
+
+
+
+#-----------------------2: Protected area
+# binary classification of protected area at 0.1 degree
+landcover_PA <- rast(
+  file.path(dir_input, "data_process/Landcover/landcover_PA_pt1.tif"),
+  lyrs = 2
+)
+levels(landcover_PA) <- data.frame(
+  id = c(0, 1),
+  labels = c("Non-Protected", "Protected area")
+)
+landcover_PA <- landcover_PA %>%
+  terra::mask(
+    vect(world_rel)
+  )
+
+p2 <- ggplot() +
+  geom_spatraster(
+    data = landcover_PA,
+    maxcell = dim(landcover_PA)[1] * dim(landcover_PA)[2]
+  ) +
+  scale_fill_manual(
+    name = "Distribution of protected areas",
+    limits = c("Non-Protected", "Protected area"),
+    values = c("white", "green4"),
+    na.value = "#C3E8F9",                                            # sea color
+    guide = guide_legend(
+      title.position = "top", title.hjust = 0.5,
+      nrow = 1#, label.position = "bottom"
+    )
+  ) +
+  geom_sf(
+    data = world_rel, fill = NA,
+    color = "black", linewidth = 0.2
+  ) +
+  scale_x_continuous(
+    expand = expansion(add = 0)
+  ) +
+  scale_y_continuous(
+    limits = c(-57, 83),
+    expand = expansion(add = 0)
+  ) +
+  theme(
+    panel.background = element_blank(),
+    panel.border = element_rect(fill = NA, color = "black", linewidth = 0.2),
+    panel.grid = element_blank(),
+    
+    legend.position = "bottom",
+    legend.key.size = unit(con_axis_text*1.5, "mm"),
+    legend.key = element_rect(color = "black", linewidth = 0.5),
+    legend.box.spacing = unit(0, "mm"),   # shrink interspace between legend and panel
+    legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "mm"),
+    
+    plot.margin = margin(t = 0, r = 1, b = 0, l = 1, unit = "mm"),
+    
+    plot.title = element_text(size = con_axis_title*.pt, face = "bold"),
+    plot.title.position = "plot",
+    axis.text = element_text(size = con_axis_text*.pt),
+    legend.title = element_text(size = con_axis_title*.pt),
+    legend.text = element_text(size = con_axis_text*.pt)
+  ) +
+  labs(
+    x = NULL,
+    y = NULL,
+    title = "B"
+  )
+
+#ggsave(
+#  file.path(dir_figs, "fig_s05_p2.pdf"),
+#  p2,
+#  width = 160, height = 80, units = "mm"
+#)
+
+
+
+#-----------------------3: Footprint index
+landcover_footprint <- rast(
+  file.path(
+    dir_input, "data_process/Landcover/landcover_footprint_pt1.tif"
+  )
+)
+
+p3 <- ggplot() +
+  geom_spatraster(
+    data = landcover_footprint,
+    maxcell = dim(landcover_footprint)[1] * dim(landcover_footprint)[2]
+  ) +
+  geom_sf(
+    data = world_rel, fill = NA,
+    color = "black", linewidth = 0.2
+  ) +
+  scale_fill_distiller(
+    name = "Human footprint index",
+    palette = "RdYlGn",
+    na.value = "#C3E8F9",                                            # sea color
+    guide = guide_colorbar(
+      #frame.colour = "black",
+      #ticks.colour = "black",
+      title.position = "top",
+      barwidth = grid::unit(0.92, "npc"),
+      barheight = grid::unit(con_axis_text*1.5, "mm")
+    )
+  ) +
+  scale_x_continuous(
+    expand = expansion(add = 0)
+  ) +
+  scale_y_continuous(
+    limits = c(-57, 83),
+    expand = expansion(add = 0)
+  ) +
+  theme(
+    panel.grid = element_blank(),
+    panel.background = element_blank(),
+    panel.border = element_rect(fill = NA, color = "black", linewidth = 0.2),
+    
+    legend.position = "bottom",
+    #legend.key.size = unit(con_axis_text*1.5, "mm"),
+    legend.frame = element_rect(color = "black", linewidth = 0.2),
+    legend.ticks = element_line(color = "black", linewidth = 0.2),
+    legend.box.spacing = unit(0, "mm"),   # shrink interspace between legend and panel
+    legend.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "mm"),
+    
+    plot.margin = margin(t = 0, r = 1, b = 0, l = 1, unit = "mm"),
+    
+    plot.title = element_text(size = con_axis_title*.pt, face = "bold"),
+    plot.title.position = "plot",
+    axis.text = element_text(size = con_axis_text*.pt),
+    legend.title = element_text(size = con_axis_title*.pt, hjust = 0.5),
+    legend.text = element_text(size = con_axis_text*.pt)
+  ) +
+  labs(
+    x = NULL,
+    y = NULL,
+    title = "C"
+  )
+
+#ggsave(
+#  file.path(dir_figs, "fig_s05_p3.pdf"),
+#  p3,
+#  width = 160, height = 85, units = "mm"
+#)
+
+```
+
+
+# Figure S06
+
+在不同footprint区间内, 火点与其最近WUI之间距离的分布.
+
+```{r}
+#| label: fig_s06
+
+# exact_footprint: 火点所在1km格网上的human footprint level
+# exact_modification: 火点所在1km格网上的human modification gradient
+# exact_PA_ratio:  火点所在0.05°格网上的保护区面积占比
+# exact_PA_binary: 火点所在0.05°格网, 依据0.5这一阈值区分是(1)否(0)是保护区.
+# exact_MCD12Q1: 火点所在500m格网的土地覆被精细分类.
+# exact_MCD12Q1_agg: 火点所在500m格网的土地覆被聚合分类.
+# WUI_type_nature: 火点所在10m格网的属性值(有0-8九个数值, 0为海洋)
+# WUI_dist_nature: 火点所在100km×100km切片内, 距离切片内部最近WUI的距离(单位为米)
+
+
+#-----------------------1: 读取匹配了精细属性的火点数据
+rawdt_exact_combine <- fread(
+  file.path(dir_input, "WUI_nature/dt_exact_combine.csv")
+)
+str(rawdt_exact_combine)
+names(rawdt_exact_combine)
+# "id_in_year", "longitude", "latitude", "acq_date", "frp", "year"              
+# "exact_footprint", "exact_modification", "exact_PA_ratio", "exact_PA_binary",
+# "exact_MCD12Q1",   "exact_MCD12Q1_agg",  "tile_MCD12Q1",
+# "WUI_type_nature", "WUI_dist_nature",    "tile_WUI"
+# 我们依据火点的观测时间为其匹配周次变量;
+# 我们依据火点经纬度坐标为其匹配对应的0.5°格网.
+
+
+
+#-----------------------2: 关联日期, 格网编号并进行初步筛选
+##---------------2.1 识别日期对应的周次
+# 由于lubridate::week计算效率过低,
+# 我们先直接计算出每一天对应的年份和周次, 然后根据日期字符串进行关联.
+date_match <- data.table(
+  date = seq(from = ymd(20160101), to = ymd(20201231), by = "1 day")
+  ) %>%
+  .[, week := week(date)] %>%
+  .[,
+    `:=`(
+      date = as.character(date),
+      week = as.integer(week)
+    )
+  ]
+
+
+##---------------2.2 全球0.5°格网编号
+intg_pixelID <- rast(
+  file.path(dir_input, "data_aggregation/intg_pixelID_pt5.tif")
+)
+
+
+##---------------2.3 组合原始面板中的id和week变量
+# 后续需要对火点数据开展基于footprint和modification的分组异质性建模.
+# 之前我们用的是全部的火点数据去等分分组, 但这样其实得到的并不是真正的等分,
+# 更准确的做法应当是只保留研究时段内的火点观测值,
+# 也就是panel_unbalance中"id"和"week"构成的组合变量.
+filt_comb <- panel_unbalance %>%
+  .[, .SD[1], by = c("id", "week")] %>%
+  .[,
+    filt_comb := paste(id, week, sep = "_")
+  ] %>%
+  .[, filt_comb]
+print(object.size(filt_comb), unit = "Mb")                               # 62 Mb
+
+
+##---------------2.4 制作后续使用的火点数据
+dt_exact_combine <- rawdt_exact_combine %>%
+  .[, acq_date := as.character(acq_date)] %>%
+  # 关联与日期对应的年份和周次
+  merge(
+    date_match,
+    by.x = "acq_date",
+    by.y = "date",
+    all.x= TRUE,
+    sort = FALSE
+  ) %>%
+  # 根据经纬度提取其所在0.5°格网的编号
+  .[,
+    "id" := terra::extract(
+      intg_pixelID,
+      data.frame(
+        x = longitude,
+        y = latitude
+      ),
+      ID = FALSE
+    )
+  ] %>%
+  # 制作0.5°格网编号与周次的组合变量
+  .[,
+    id_week := paste(id, week, sep = "_")
+  ] %>%
+  .[id_week %in% filt_comb] %>%
+  .[, id_week := NULL]
+
+nrow(dt_exact_combine)
+# 27497294
+# 火点数目从原来的82744585减少到了现在的27497294, 降幅达到66.7%
+
+
+
+#-----------------------3: 关联footprint分组
+dt_exact_combine[, sum(is.na(exact_footprint))] / dt_exact_combine[, .N]
+# 缺失值占比: 0.001
+dt_exact_combine[, quantile(exact_footprint, probs = seq(0, 1, 0.25), na.rm = TRUE)]
+# 0%     25%     50%      75%  100% 
+#  0    4.74    8.71    14.56    50
+
+dt_footprint_dist <- dt_exact_combine %>%
+  # 基于火点所在精细格网的人类足迹指数, 对火点进行分区
+  .[,
+    int_footprint := classify_intervals(
+      exact_footprint, n = 4, style = "quantile", factor = FALSE
+    )
+  ] %>%
+  .[!is.na(int_footprint)]
+
+
+
+#-----------------------4: Plot
+p <- ggplot(dt_footprint_dist[!is.na(WUI_dist_nature)]) +
+  geom_boxplot(
+    aes(x = as.character(int_footprint), y = WUI_dist_nature + 1),
+    outliers = FALSE,
+    linewidth = 0.3
+  ) +
+  scale_x_discrete(
+    name = "Interval of human footprint",
+    limits = c("1", "2", "3", "4"),
+    #labels = c("[0, 4.7)", "[4.7, 8.7)", "[8.7, 14.5)", "[14.5, 50]")
+    labels = c("[0, 25%)", "[25%, 50%)", "[50%, 75%)", "[75%, 100%]")
+  ) +
+  scale_y_continuous(
+    name = "Distance to the nearst WUI (m)",
+    transform = "log10",
+    breaks = c(100, 1000, 10000, 100000),
+    labels = expression(10^2, 10^3, 10^4, 10^5)
+  ) +
+  theme(
+    panel.background = element_rect(fill = "white"),
+    panel.border = element_rect(fill = NA, color = "black", linewidth = 0.2),
+    
+    axis.title = element_text(size = con_axis_title*.pt),
+    axis.text = element_text(size = con_axis_text*.pt*0.95)
+  ) +
+  labs(
+    title = NULL
+  )
+p
+
+#ggsave(
+#  file.path(dir_figs, "fig_s06.png"),
+#  p,
+#  width = 90, height = 70, units = "mm", dpi = 300
+#)
+#ggsave(
+#  file.path(dir_figs, "fig_s06.pdf"),
+#  p,
+#  width = 90, height = 70, units = "mm"
+#)
+
+```
+
+
+# Figure S07
+
+在不同WUI距离区间内检测到的火点占比, 以阐明火点主要集中在WUI附近.
+
+```{r}
+#| label: fig_s07
+
+# exact_footprint: 火点所在1km格网上的human footprint level
+# exact_modification: 火点所在1km格网上的human modification gradient
+# exact_PA_ratio:  火点所在0.05°格网上的保护区面积占比
+# exact_PA_binary: 火点所在0.05°格网, 依据0.5这一阈值区分是(1)否(0)是保护区.
+# exact_MCD12Q1: 火点所在500m格网的土地覆被精细分类.
+# exact_MCD12Q1_agg: 火点所在500m格网的土地覆被聚合分类.
+# WUI_type_nature: 火点所在10m格网的属性值(有0-8九个数值, 0为海洋)
+# WUI_dist_nature: 火点所在100km×100km切片内, 距离切片内部最近WUI的距离(单位为米)
+
+
+#-----------------------1: 读取匹配了精细属性的火点数据
+rawdt_exact_combine <- fread(
+  file.path(dir_input, "WUI_nature/dt_exact_combine.csv")
+)
+str(rawdt_exact_combine)
+names(rawdt_exact_combine)
+# "id_in_year", "longitude", "latitude", "acq_date", "frp", "year"              
+# "exact_footprint", "exact_modification", "exact_PA_ratio", "exact_PA_binary",
+# "exact_MCD12Q1",   "exact_MCD12Q1_agg",  "tile_MCD12Q1",
+# "WUI_type_nature", "WUI_dist_nature",    "tile_WUI"
+# 我们依据火点的观测时间为其匹配周次变量;
+# 我们依据火点经纬度坐标为其匹配对应的0.5°格网.
+
+
+
+#-----------------------2: 关联日期, 格网编号并进行初步筛选
+##---------------2.1 识别日期对应的周次
+# 由于lubridate::week计算效率过低,
+# 我们先直接计算出每一天对应的年份和周次, 然后根据日期字符串进行关联.
+date_match <- data.table(
+  date = seq(from = ymd(20160101), to = ymd(20201231), by = "1 day")
+  ) %>%
+  .[, week := week(date)] %>%
+  .[,
+    `:=`(
+      date = as.character(date),
+      week = as.integer(week)
+    )
+  ]
+
+
+##---------------2.2 全球0.5°格网编号
+intg_pixelID <- rast(
+  file.path(dir_input, "data_aggregation/intg_pixelID_pt5.tif")
+)
+
+
+##---------------2.3 组合原始面板中的id和week变量
+# 后续需要对火点数据开展基于footprint和modification的分组异质性建模.
+# 之前我们用的是全部的火点数据去等分分组, 但这样其实得到的并不是真正的等分,
+# 更准确的做法应当是只保留研究时段内的火点观测值,
+# 也就是panel_unbalance中"id"和"week"构成的组合变量.
+filt_comb <- panel_unbalance %>%
+  .[, .SD[1], by = c("id", "week")] %>%
+  .[,
+    filt_comb := paste(id, week, sep = "_")
+  ] %>%
+  .[, filt_comb]
+print(object.size(filt_comb), unit = "Mb")                               # 62 Mb
+
+
+##---------------2.4 制作后续使用的火点数据
+dt_exact_combine <- rawdt_exact_combine %>%
+  .[, acq_date := as.character(acq_date)] %>%
+  # 关联与日期对应的年份和周次
+  merge(
+    date_match,
+    by.x = "acq_date",
+    by.y = "date",
+    all.x= TRUE,
+    sort = FALSE
+  ) %>%
+  # 根据经纬度提取其所在0.5°格网的编号
+  .[,
+    "id" := terra::extract(
+      intg_pixelID,
+      data.frame(
+        x = longitude,
+        y = latitude
+      ),
+      ID = FALSE
+    )
+  ] %>%
+  # 制作0.5°格网编号与周次的组合变量
+  .[,
+    id_week := paste(id, week, sep = "_")
+  ] %>%
+  .[id_week %in% filt_comb] %>%
+  .[, id_week := NULL]
+
+nrow(dt_exact_combine)
+# 27497294
+# 火点数目从原来的82744585减少到了现在的27497294, 降幅达到66.7%
+
+
+
+#-----------------------3: 依据与最近WUI间的距离组织分区
+dt_exact_combine[, sum(is.na(WUI_dist_nature))] / dt_exact_combine[, .N]
+# 缺失值占比: 0.022
+dt_exact_combine[, quantile(WUI_dist_nature, probs = seq(0, 1, 0.1), na.rm = TRUE)]
+# 0%  10%    20%    30%    40%    50%    60%    70%     80%     90%     100% 
+# 0   416   1023   1670   2447   3467   4918   7215   11396   21392   136165
+# 可见火点主要分布在WUI附近, 我们制作柱状图进行统计展示.
+# [0, 20km]每公里区间内统计火点频率, 20公里以上单独统计火点频率.
+
+dt_freq_dist <- dt_exact_combine %>%
+  .[!is.na(WUI_dist_nature)] %>%
+  .[,
+    int_distance := cut(
+      WUI_dist_nature,
+      breaks = c(seq(0, 20)*10^3, Inf),
+      labels = c(seq(1, 20), 23) %>% as.character(),
+      include.lowest = TRUE
+    )
+  ] %>%
+  .[,
+    .(
+      fire_count = .N
+    ),
+    by = "int_distance"
+  ] %>%
+  .[, fire_freq := fire_count/sum(fire_count)*100] %>%
+  .[, int_distance_num := int_distance %>% as.character() %>% as.integer()] %>%
+  .[order(int_distance_num)]
+
+
+
+#-----------------------4: Plot
+ggplot(dt_freq_dist) +
+  geom_col(
+    aes(x = int_distance_num-0.5, y = fire_freq),
+    color = "black", fill = "grey90",
+    width = 1, linewidth = 0.2
+  ) +
+  scale_x_continuous(
+    name = "Interval of the distance to the nearst WUI (km)",
+    breaks = c(0, 5, 10, 15, 20, 22.5),
+    labels = c("0", "5", "10", "15", "20", ">20")
+  ) +
+  scale_y_continuous(
+    name = "Frequency of active fire detections (%)",
+    limits = c(0, 21),
+    expand = expansion(add = 0)
+  ) +
+  theme(
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "white"),
+    panel.border = element_rect(fill = NA, color = "black", linewidth = 0.2),
+    
+    axis.title = element_text(size = con_axis_title*.pt),
+    axis.text = element_text(size = con_axis_text*.pt)
+  )
+
+#ggsave(
+#  file.path(dir_figs, "fig_s07.png"),
+#  width = 100, height = 70, units = "mm", dpi = 300
+#)
+#ggsave(
+#  file.path(dir_figs, "fig_s07.pdf"),
+#  width = 100, height = 70, units = "mm"
+#)
+
+```
+
+
+# Figure S08
+
+Administrative levels for OxCGRT dataset.
+This code is in local side, using some GAMD data with large size.
+
+# Figure S09
+
+Lockdown status for each 0.5 pixel.
+This code is in local side, since mobility divisions are large size.
+
+
+
+# Placebo test
+
+
+## Fixed effect
+
+
+```{r}
+#| label: placebo_fixed
+
+#-----------------------1: Placebo function
+placebo_fixed <- function(
+  rawdata,
+  boot = 1000,
+  seed = 182,
+  yvar = "actfire_sum",
+  xvar = "pl_shutdown",
+  controls = "+ weather_tempe + weather_tempe_square + weather_winds + weather_preci + weather_RH + weather_VPD",
+  fe = "intg_oxfordID^intg_biome^week + intg_oxfordID^intg_biome^year",
+  vvar = "intg_oxfordID^intg_biome"
+  ) {
+  
+  ##-------------1.1 preparation
+  # Here we permute by intg_oxfordID.
+  dt_raw <- data.table(
+    intg_oxfordID = rawdata[, unique(intg_oxfordID)]
+  )
+  vec_coef_pl = vector(mode = "numeric", length = boot)
+
+  fmla_fixed <- as.formula(
+    paste(yvar, "~", xvar, controls, "|", fe)
+  )
+  
+  
+  ##-------------1.2 placebo duplication
+  set.seed(seed)
+  
+  for (ii in 1:boot) {
+    
+    ##---- for each city, randomly assign the treated year
+    dt_treat <- dt_raw %>%
+      copy() %>%
+      .[,
+        pl_year := cut(
+          x = runif(.N),
+          breaks = c(0, 0.25, 0.5, 0.75, 1),
+          include.lowest = TRUE,
+          labels = c("2016", "2017", "2018", "2019")
+        ) %>% as.character() %>% as.integer()
+      ]
+    
+    ##---- make placebo data frame
+    # set the variable "pl_shutdown" for DiD modeling.
+    pl_panel <- rawdata %>%
+      copy() %>%
+      .[year <= 2019] %>%
+      merge(
+        dt_treat, by = "intg_oxfordID",
+        all = FALSE, sort = FALSE
+      ) %>%
+      .[, indicator := as.integer(year == pl_year)] %>%                # 1 and 0
+      .[, pl_shutdown := shutdown * indicator]               # modeling variable
+    
+    ##---- fixed-effects models
+    fixed_glb <- feglm(
+      fmla_fixed,
+      pl_panel,
+      family = "poisson",
+      vcov = as.formula(paste0("~", vvar))
+    )
+    vec_coef_pl[ii] = coef(fixed_glb)["pl_shutdown"]
+    
+    
+    print(paste0(ii, " is done"))
+  }
+  
+  return(vec_coef_pl)
+}
+
+
+
+#-----------------------2: Placebo test
+# 时间测试
+#tt <- Sys.time()
+#vec_placebo_fixed <- placebo_fixed(
+#  panel_unbalance,
+#  boot = 10
+#)
+#print(Sys.time() - tt)
+# 10个循环, 用时36秒.
+# 那么换算到1000个循环, 用时约为60分钟, 还可以接受.
+
+# 具体执行文件见Fire文件夹下的Main-3_2_placebo_fixed.R.
+#tt <- Sys.time()
+#vec_placebo_fixed <- placebo_fixed(
+#  panel_unbalance
+#)
+#print(Sys.time() - tt)                                         # 7.720767 hours
+#saveRDS(vec_placebo_fixed, file.path(dir_data, "Main-3_2_placebo_fixed.rds"))
+```
+
+
+## Temporal impact analysis
+
+总体以及分组的Temporal impact检验
+
+```{r}
+#| label: global_event
+
+# regression results in country level in figure 2
+dt_coef_country <- readRDS(
+  file.path(dir_data, "Main-3_2_dt_coef_country.rds")
+)
+
+
+#-----------------------1: Placebo function
+## This chunk defines the placebo-test function for Event-study.
+# We randomly assign the treatment year between 2016 and 2019 for each intg_oxfordID,
+# while maintaining consistent start-week series at the grid level.
+# The first action consider the fact that fixed effects in our model are
+# set at administrative region level rather than the grid level.
+# The second action consider that changepoints identified for each grid may not
+# be homogeneous within each administrative_oxford level, such as mobility
+# approach for China and other areas.
+
+placebo_event <- function(
+    rawdata,
+    boot = 1000,
+    seed = 182,
+    yvar = "actfire_sum",
+    xvar = "i(week_to_pl_year, ref = c(-1000, -1))",
+    controls = "+ weather_tempe + weather_tempe_square + weather_winds + weather_preci + weather_RH + weather_VPD",
+    fe = "intg_oxfordID^intg_biome^week + intg_oxfordID^intg_biome^year",
+    vvar = "intg_oxfordID^intg_biome"
+){
+  # input: original data
+  # output: a data.frame of samples (row for each week, column for each sample)
+  # pre-package: data.table, magrittr
+  
+  
+  #--------------1.1 preparation
+  # Here we permute by intg_oxfordID
+  dt_raw <- data.table(
+    intg_oxfordID = rawdata[, unique(intg_oxfordID)]
+  )
+  
+  # column names for samples
+  samp_cols <- paste0(
+    "sample_", stringr::str_pad(1:boot, width = 4, side = "left", pad = 0)
+  )
+  # final data.table
+  ## global data.table
+  mine_dt_glb <- data.table(
+    relative_week = seq(
+      from = max(-10, rawdata[week_to_treated != -1000, min(week_to_treated)]),
+      to = min(15, rawdata[, max(week_to_treated)]),
+      by = 1
+    ),
+    week_to_pl_year = paste(
+      "week_to_pl_year",
+      seq(
+        from = max(-10, rawdata[week_to_treated != -1000, min(week_to_treated)]),
+        to = min(15, rawdata[, max(week_to_treated)]),
+        by = 1
+      ),
+      sep = "::"
+    )
+  ) %>%
+    .[relative_week != -1] %>%
+    # add columns in batches
+    .[, (samp_cols) := list(NA)]
+  ## countries with decreased fire
+  mine_dt_dec <- copy(mine_dt_glb)
+  ## countries with increased fire
+  mine_dt_inc <- copy(mine_dt_glb)
+  
+  # formula for the event study
+  fmla_event <- as.formula(
+    paste(yvar, "~", xvar, controls, "|", fe)
+  )
+  
+  
+  ##-------------1.2 placebo duplication
+  set.seed(seed)
+  
+  for (ii in 1:boot) {
+    
+    ##-- randomly assign treatment year within each intg_oxfordID
+    dt_treat <- dt_raw %>%
+      copy() %>%
+      .[,
+        pl_year := cut(
+          x = runif(.N),
+          breaks = c(0, 0.25, 0.5, 0.75, 1),
+          include.lowest = TRUE,
+          labels = c("2016", "2017", "2018", "2019")
+        ) %>% as.character() %>% as.integer()
+      ]
+    
+    ##-- join data.table and set "week_to_plyear"
+    pl_panel <- rawdata %>%
+      copy() %>%
+      .[year <= 2019] %>%
+      merge(
+        dt_treat, by = "intg_oxfordID",
+        all = FALSE, sort = FALSE
+      ) %>%
+      # week_to_pl_year works as the modeling variable
+      .[, week_to_pl_year := -1000] %>%                       # -1000 as default
+      # 1) randomly assgin treatment year at the oxford_admin level
+      # 2) inherent specific identification results at the pixel level
+      .[year == pl_year, week_to_pl_year := week_to_treated]
+    
+    ##-- event-study coefficients for globe
+    event_glb <- feglm(
+      fmla_event,
+      pl_panel,
+      family = "poisson",
+      vcov = as.formula(paste0("~", vvar))
+    )
+    result_glb <- coeftable(event_glb)
+    coef_glb <- result_glb[mine_dt_glb$week_to_pl_year, "Estimate"]
+    names(coef_glb) <- NULL
+    # fill coefficients
+    mine_dt_glb[, (ii+2) := coef_glb]
+    
+    ##-- event-study coefficients for countries with decreased fire
+    event_dec <- feglm(
+      fmla_event,
+      pl_panel[CountryName %in% dt_coef_country[coef < 0, group_lab]],
+      family = "poisson",
+      vcov = as.formula(paste0("~", vvar))
+    )
+    result_dec <- coeftable(event_dec)
+    coef_dec <- result_dec[mine_dt_dec$week_to_pl_year, "Estimate"]
+    names(coef_dec) <- NULL
+    # fill coefficients
+    mine_dt_dec[, (ii+2) := coef_dec]
+    
+    ##-- event-study coefficients for countries with increased fire
+    event_inc <- feglm(
+      fmla_event,
+      pl_panel[CountryName %in% dt_coef_country[coef > 0, group_lab]],
+      family = "poisson",
+      vcov = as.formula(paste0("~", vvar))
+    )
+    result_inc <- coeftable(event_inc)
+    coef_inc <- result_inc[mine_dt_inc$week_to_pl_year, "Estimate"]
+    names(coef_inc) <- NULL
+    # fill coefficients
+    mine_dt_inc[, (ii+2) := coef_inc]
+    
+    
+    print(paste0(ii, " is done"))
+    
+  }
+  
+  list_all <- list(mine_dt_glb, mine_dt_dec, mine_dt_inc)
+  return(list_all)
+  
+}
+
+
+
+#-----------------------2: Placebo test
+# 时间测试
+tt <- Sys.time()
+list_placebo_event <- placebo_event(
+  panel_unbalance,
+  boot = 10
+)
+print(Sys.time() - tt)                                          # 1.172558 hours
+# 10个循环, 用时为1.172558 hours.
+# 那么换算到1000个循环, 用时约为117小时.
+
+# 具体执行文件见Fire文件夹下的Main-3_2_placebo_event.R.
+#tt <- Sys.time()
+#list_placebo_event <- placebo_event(
+#  panel_unbalance
+#)
+#print(Sys.time() - tt)                                         # 4.564204 days
+#saveRDS(list_placebo_event, file.path(dir_data, "Main-3_2_placebo_event.rds"))
+```
+
+
+## Response of mobility
+
+
+```{r}
+#| label: placebo_response
+
+# regression results in country level in figure 2
+dt_coef_country <- readRDS(
+  file.path(dir_data, "Main-3_2_dt_coef_country.rds")
+)
+
+
+#-----------------------1: Panel for spline
+# Oxford dataset: full series from 2020.01.01 to 2020.12.31
+# Mobility index:
+#  - China: full series from 2020.01.01 to 2020.05.02
+#  - World: series (maybe with missing values) from 2020.02.15 to 2020.12.31
+
+panel_spline <- panel_unbalance %>%
+  copy() %>%
+  .[!is.na(intg_oxfordID)] %>%                        # 必须匹配上了牛津政策指数
+  .[!is.na(intg_mobilityID)] %>%                      # 必须匹配上了移动性指数***
+  #.[break_group == "lock-both"] %>%                # 这是新加的,一会儿跑一下试试
+  # transform mobility_SI and mobility_index to original units first
+  .[,
+    `:=`(
+      mobility_SI = mobility_SI / 100,
+      mobility_index = mobility_index / 100
+    )
+  ] %>%
+  # For mobility_SI, there are no NA and negative values during shutdown in 2020, as expected.
+  # And all observations in 2016-2019 or before shutdown in 2020 are set as 0.
+  # But for mobility_index, there are NA (21%) and negative values. We leaves NA alone.
+  # Now we manually set the numbers bigger than 0(1%) as 0, and then 
+  # transform the interval [-100, 0] to [0, 100]
+  .[mobility_index > 0, mobility_index := 0] %>%
+  .[, mobility_index := mobility_index * -1] %>%
+  # spline coordinates for mobility_SI
+  .[, paste0("ns_SI_", 1:4) := as.data.frame(
+        splines::ns(
+          mobility_SI,
+          # SI的分布过于集中在后面了
+          knots = c(50, 80, 95), intercept = FALSE,
+          Boundary.knots = c(0, 100)
+        )
+    )] %>%
+  # essential***
+  .[shutdown_2020 == 0, paste0("ns_SI_", 1:4) := 0] %>%
+  # spline coordinates for mobility_index
+  .[, paste0("ns_mob_", 1:4) := as.data.frame(
+        splines::ns(
+          mobility_index,
+          knots = c(20, 40, 60), intercept = FALSE,
+          Boundary.knots = c(0, 100)
+        )
+    )] %>%
+  # essential***
+  .[shutdown_2020 == 0, paste0("ns_mob_", 1:4) := 0]
+
+panel_spline[shutdown_2020 == 1, summary(mobility_index)]
+# Min. 1st Qu.  Median    Mean 3rd Qu.    Max.    NA's 
+# 0.00   24.28   34.28   34.27   44.28   92.68       9
+panel_spline[shutdown_2020 == 1, quantile(mobility_index, probs = seq(0, 1, 0.1), na.rm = TRUE)]
+#   0%   10%   20%   30%   40%   50%   60%   70%   80%   90%  100% 
+# 0.00 13.87 22.42 26.85 29.28 34.28 38.85 41.14 47.14 53.28 92.68
+# 53.28*** account for 90% observations
+
+
+
+#-----------------------2: Placebo regression
+placebo_curve <- function(
+    rawdata,
+    boot = 1000,
+    seed = 182,
+    yvar = "actfire_sum",
+    xvar = paste(paste0("pl_mob_", 1:4), collapse = " + "),
+    controls = "+ weather_tempe + weather_tempe_square + weather_winds + weather_preci + weather_RH + weather_VPD",
+    fe = "intg_oxfordID^intg_biome^week + intg_oxfordID^intg_biome^year",
+    vvar = "intg_oxfordID^intg_biome",
+    bd_kts = c(0, 100),
+    kts = c(20, 40, 60),
+    pts = 0:100
+) {
+  
+  nn <- length(kts) + 1                                           # no intercept
+  
+  #--------------1: Preparation
+  # We have already calculated the spline coordinates for observations
+  # during shutdown period in 2020, with knots at 20, 40 and 60 respectively.
+  
+  ##----1.1 formula
+  fmla_spline <- as.formula(
+    paste(yvar, "~", xvar, controls, "|", fe)
+  )
+  
+  ##----1.2 spline transformation of fixed pts
+  mat_pts <- as.matrix(
+    splines::ns(pts, knots = kts, intercept = FALSE, Boundary.knots = bd_kts)
+  )
+  
+  ##----1.3 Original data.table with just oxford admin
+  # Here we permute by intg_oxfordID
+  dt_raw <- data.table(
+    intg_oxfordID = rawdata[, unique(intg_oxfordID)]
+  )
+  # ns_2020_1:4
+  panel_2020 <- rawdata %>%
+    .[year == 2020] %>%
+    .[, .(id, week, ns_mob_1, ns_mob_2, ns_mob_3, ns_mob_4)] %>%
+    setnames(
+      old = paste0("ns_mob_", 1:4),
+      new = paste0("ns_2020_", 1:4)
+    )
+  panel_here <- rawdata %>%
+    copy() %>%
+    .[, paste0("ns_mob_", 1:4) := NULL] %>%
+    merge(
+      panel_2020,
+      by = c("id", "week"),
+      all = FALSE, sort = FALSE
+    )
+  
+  
+  #--------------2: Permuted assignment
+  set.seed(seed)
+  out_response_glb <- out_response_dec <- out_response_inc <- c()
+  
+  for (ii in 1:boot) {
+    
+    ##-- randomly assign treatment year within each intg_oxfordID
+    dt_treat <- dt_raw %>%
+      copy() %>%
+      .[,
+        pl_year := cut(
+          x = runif(.N),
+          breaks = c(0, 0.25, 0.5, 0.75, 1),
+          include.lowest = TRUE,
+          labels = c("2016", "2017", "2018", "2019")
+        ) %>% as.character() %>% as.integer()
+      ]
+    
+    ##-- join data.table and set "pl_mob_1:4"
+    pl_panel <- panel_here %>%
+      copy() %>%
+      .[year <= 2019] %>%
+      merge(
+        dt_treat, by = "intg_oxfordID",
+        all = FALSE, sort = FALSE
+      ) %>%
+      # pl_mob_1:4 work as modeling variables
+      .[, paste0("pl_mob_", 1:4) := 0] %>%                        # 0 as default
+      # 1) randomly assgin treatment year at the oxford_admin level
+      # 2) inherent specific identification results at the pixel level
+      .[year == pl_year,
+        paste0("pl_mob_", 1:4) := .(
+          ns_2020_1, ns_2020_2, ns_2020_3, ns_2020_4
+        )
+      ]
+    
+    ##-- overall response
+    model_spline_glb <- feglm(
+      fmla_spline,
+      pl_panel,
+      family = "poisson",
+      vcov = as.formula(paste0("~", vvar))
+    )
+    vec_coef_glb <- coef(model_spline_glb)[paste0("pl_mob_", 1:4)]
+    vec_response_glb <- as.numeric(mat_pts %*% vec_coef_glb)
+    out_response_glb <- cbind(out_response_glb, vec_response_glb)
+    
+    ##-- countries with decreased fire
+    model_spline_dec <- feglm(
+      fmla_spline,
+      pl_panel[CountryName %in% dt_coef_country[coef < 0, group_lab]],
+      family = "poisson",
+      vcov = as.formula(paste0("~", vvar))
+    )
+    vec_coef_dec <- coef(model_spline_dec)[paste0("pl_mob_", 1:4)]
+    vec_response_dec <- as.numeric(mat_pts %*% vec_coef_dec)
+    out_response_dec <- cbind(out_response_dec, vec_response_dec)
+
+    ###-- countries with increased fire
+    model_spline_inc <- feglm(
+      fmla_spline,
+      pl_panel[CountryName %in% dt_coef_country[coef > 0, group_lab]],
+      family = "poisson",
+      vcov = as.formula(paste0("~", vvar))
+    )
+    vec_coef_inc <- coef(model_spline_inc)[paste0("pl_mob_", 1:4)]
+    vec_response_inc <- as.numeric(mat_pts %*% vec_coef_inc)
+    out_response_inc <- cbind(out_response_inc, vec_response_inc)
+    
+    
+    print(paste0(ii, " is done."))
+  }
+  
+  df_response_glb <- data.frame(pts, out_response_glb)
+  df_response_dec <- data.frame(pts, out_response_dec)
+  df_response_inc <- data.frame(pts, out_response_inc)
+  
+  list_all <- list(df_response_glb, df_response_dec, df_response_inc)
+  return(list_all)
+  
+}
+
+# 时间测试
+#tt <- Sys.time()
+#list_placebo_curve <- placebo_curve(
+#  panel_spline,
+#  boot = 10
+#)
+#print(Sys.time() - tt)
+# 10个循环, 用时为??.
+# 那么换算到1000个循环, 用时约为??.
+# 显示有缺失值是因为编号为904的移动性ID.
+# 其匹配上的移动性数据是第7周以后才有的, 但根据政策数据第4周就发生了封锁
+# 所以有一个mobility在2020年封锁时段内缺失数据的情况, 影响不大.
+
+# 具体执行文件见Fire文件夹下的Main-3_2_placebo_curve.R.
+#tt <- Sys.time()
+#list_placebo_curve <- placebo_curve(
+#  panel_spline
+#)
+#print(Sys.time() - tt)                                          # 17.0731 hours
+#saveRDS(list_placebo_curve, file.path(dir_data, "Main-3_2_placebo_curve.rds"))
+```
+
+
+# Table 1
+
+Robust tests for the overall fixed effects
+
+```{r}
+#| label: table_1
+
+# parameters in the main model
+yvar = "actfire_sum"
+xvar = "shutdown_2020"
+vvar = "intg_oxfordID^intg_biome"
+controls = "+ weather_tempe + weather_tempe_square + weather_winds + weather_preci + weather_RH + weather_VPD"
+fe = "intg_oxfordID^intg_biome^week + intg_oxfordID^intg_biome^year"
+
+fmla_fixed <- as.formula(
+  paste(yvar, "~", xvar, controls, "|", fe)
+)
+
+#-----------------------1: main model
+fixed_glb_1 <- feglm(
+  fmla_fixed,
+  panel_unbalance,
+  family = "poisson",
+  vcov = as.formula(paste0("~", vvar))
+)
+fixed_glb_1
+# Observations: 4,513,586
+# Adj. Pseudo R2: 0.663509
+# p value: 2.5963e-02 *
+
+sprintf(
+  "%.1f",
+  (coefficients(fixed_glb_1)[["shutdown_2020"]] %>% exp() - 1)*100
+)
+# -11.8
+sprintf(
+  "%.1f",
+  (confint(fixed_glb_1)["shutdown_2020", "2.5 %"] %>% exp() - 1)*100
+)
+# -21.1
+sprintf(
+  "%.1f",
+  (confint(fixed_glb_1)["shutdown_2020", "97.5 %"] %>% exp() - 1)*100
+)
+# -1.5
+
+
+
+#-----------------------2: remove weather controls
+fixed_glb_2 <- feglm(
+  as.formula(
+    paste(yvar, "~", xvar, "|", fe)
+  ),
+  panel_unbalance,
+  family = "poisson",
+  vcov = as.formula(paste0("~", vvar))
+)
+fixed_glb_2
+# Observations: 4,513,586
+# Adj. Pseudo R2: 0.61487
+# p value: 0.44085
+
+sprintf(
+  "%.1f",
+  (coefficients(fixed_glb_2)[["shutdown_2020"]] %>% exp() - 1)*100
+)
+# -5.0
+sprintf(
+  "%.1f",
+  (confint(fixed_glb_2)["shutdown_2020", "2.5 %"] %>% exp() - 1)*100
+)
+# -16.6
+sprintf(
+  "%.1f",
+  (confint(fixed_glb_2)["shutdown_2020", "97.5 %"] %>% exp() - 1)*100
+)
+# 8.2
+
+
+
+#-----------------------3: alternative fixed effects
+fe_alter = "id + year + intg_oxfordID^intg_biome^week"
+fixed_glb_3 <- feglm(
+  as.formula(
+    paste(yvar, "~", xvar, controls, "|", fe_alter)
+  ),
+  panel_unbalance,
+  family = "poisson",
+  vcov = as.formula(paste0("~", vvar))
+)
+fixed_glb_3
+# Observations: 3,676,990
+# Adj. Pseudo R2: 0.785321
+# p value: 7.7187e-06 ***
+
+sprintf(
+  "%.1f",
+  (coefficients(fixed_glb_3)[["shutdown_2020"]] %>% exp() - 1)*100
+)
+# -20.8
+sprintf(
+  "%.1f",
+  (confint(fixed_glb_3)["shutdown_2020", "2.5 %"] %>% exp() - 1)*100
+)
+# -28.5
+sprintf(
+  "%.1f",
+  (confint(fixed_glb_3)["shutdown_2020", "97.5 %"] %>% exp() - 1)*100
+)
+# -12.3
+
+
+
+#-----------------------4: scales in 0.25 degree
+panel_unbalance_pt25 <- fread(
+  # the balance panel of 0.25 degree spans all 52 weeks from 2016-2020
+  file.path(dir_input, "data_panel/panel_pt25_0924.csv")
+  ) %>%
+  # NA in original break_group were read as "" here.
+  .[break_group %in% c("unlock", "lock-mobility", "lock-policy", "lock-both")] %>%
+  .[break_group != "unlock"] %>%
+  .[(week <= 26)&(week <= cp_2)]
+
+fixed_glb_4 <- feglm(
+  fmla_fixed,
+  panel_unbalance_pt25,
+  family = "poisson",
+  vcov = as.formula(paste0("~", vvar))
+)
+fixed_glb_4
+# Observations: 15,095,152
+# Adj. Pseudo R2: 0.570274
+# p value: 3.6848e-02 *
+
+sprintf(
+  "%.1f",
+  (coefficients(fixed_glb_4)[["shutdown_2020"]] %>% exp() - 1)*100
+)
+# -11.1
+sprintf(
+  "%.1f",
+  (confint(fixed_glb_4)["shutdown_2020", "2.5 %"] %>% exp() - 1)*100
+)
+# -20.4
+sprintf(
+  "%.1f",
+  (confint(fixed_glb_4)["shutdown_2020", "97.5 %"] %>% exp() - 1)*100
+)
+# -0.7
+
+
+
+#-----------------------5: scales in 0.1 degree
+panel_unbalance_pt1 <- fread(
+  # the balance panel of 0.1 degree spans all 52 weeks from 2016-2020
+  file.path(dir_input, "data_panel/panel_pt1_0924.csv")
+  ) %>%
+  # NA in original break_group were read as "" here.
+  .[break_group %in% c("unlock", "lock-mobility", "lock-policy", "lock-both")] %>%
+  .[break_group != "unlock"] %>%
+  .[(week <= 26)&(week <= cp_2)]
+
+fixed_glb_5 <- feglm(
+  fmla_fixed,
+  panel_unbalance_pt1,
+  family = "poisson",
+  vcov = as.formula(paste0("~", vvar))
+)
+fixed_glb_5
+# Observations: 67,216,487
+# Adj. Pseudo R2: 0.437843
+# p value: 1.7691e-02 *
+
+sprintf(
+  "%.1f",
+  (coefficients(fixed_glb_5)[["shutdown_2020"]] %>% exp() - 1)*100
+)
+# -12.5
+sprintf(
+  "%.1f",
+  (confint(fixed_glb_5)["shutdown_2020", "2.5 %"] %>% exp() - 1)*100
+)
+# -21.6
+sprintf(
+  "%.1f",
+  (confint(fixed_glb_5)["shutdown_2020", "97.5 %"] %>% exp() - 1)*100
+)
+# -2.3
+
+
+
+#-----------------------6: OLS regression
+fixed_glb_6 <- feols(
+  as.formula(
+    paste("actfire_exp", "~", xvar, controls, "|", fe)
+  ),
+  panel_unbalance,
+  vcov = as.formula(paste0("~", vvar))
+)
+fixed_glb_6
+# Observations: 4,633,405
+# Adj. R2: 0.307088
+# p value: 0.00244275 ** 
+
+sprintf(
+  "%.1f",
+  (coefficients(fixed_glb_6)[["shutdown_2020"]] /
+     panel_unbalance[, weighted.mean(actfire_exp, intg_area)]
+  )*100
+)
+# -18.3
+sprintf(
+  "%.1f",
+  (confint(fixed_glb_6)["shutdown_2020", "2.5 %"] /
+     panel_unbalance[, weighted.mean(actfire_exp, intg_area)]
+  )*100
+)
+# -30.1
+sprintf(
+  "%.1f",
+  (confint(fixed_glb_6)["shutdown_2020", "97.5 %"] /
+     panel_unbalance[, weighted.mean(actfire_exp, intg_area)]
+  )*100
+)
+# -6.5
+
+```
+
+
+# Table S1
+
+Full results of changes in country level.
+
+```{r}
+#| table_s1
+
+# 展示国家尺度建模结果时,
+# 去掉最小的Eritrea以及最大的Mongolia和Latvia这三个国家,以避免不必要的干扰信息.
+
+raw_coef_country <- readRDS(
+  file.path(dir_data, "Main-3_2_dt_coef_country.rds")
+)
+
+dt_coef_country <- raw_coef_country %>%
+  copy() %>%
+  setnames(
+    old = "group_lab", new = "Country"
+  ) %>%
+  .[, .(Country, CountryCode, raw_coef, CI_025, CI_975, p)] %>%
+  .[!(Country %in% c("Eritrea", "Mongolia", "Latvia"))] %>%
+  .[,
+    `:=`(
+      text_country = paste0(
+        Country,
+        " (",
+        CountryCode,
+        ")"
+      ),
+      text_coef = sprintf(
+        "%.1f", raw_coef*100
+      ),
+      text_CI = paste0(
+        "(",
+        sprintf("%.1f", CI_025*100),
+        ", ",
+        sprintf("%.1f", CI_975*100),
+        ")"
+      ),
+      text_p = sprintf(
+        "%.4f", p
+      )
+    )
+  ]
+
+#writexl::write_xlsx(
+#  dt_coef_country,
+#  path = file.path(dir_data, "table_s1_coef_country.xlsx")
+#)
+```
+
+
+
+
+
+
+
+
+# Table S2
+
+Full results of temporal impacts over country groups.
+
+```{r}
+#| label: table_s2
+
+# regression results in country level in figure 2
+dt_coef_country <- readRDS(
+  file.path(dir_data, "Main-3_2_dt_coef_country.rds")
+)
+
+
+#-----------------------1: Formula
+yvar = "actfire_sum"
+xvar = "i(week_to_2020, ref = c(-1000, -1))"
+vvar = "intg_oxfordID^intg_biome"         # poisson残差不能用"iid", 否则异常显著
+controls = "+ weather_tempe + weather_tempe_square + weather_winds + weather_preci + weather_RH + weather_VPD"
+fe = "intg_oxfordID^intg_biome^week + intg_oxfordID^intg_biome^year"
+
+fmla_event <- as.formula(
+  paste(yvar, "~", xvar, controls, "|", fe)
+)
+
+
+
+#-----------------------2: Model
+##---------------2.1 Global regression
+event_glb <- feglm(
+  fmla_event,
+  panel_unbalance,
+  family = "poisson",
+  vcov = as.formula(paste0("~", vvar))
+)
+event_glb
+# Observations: 4,513,586
+# Adj. Pseudo R2: 0.664045
+
+dt_temporal_glb <- data.table(
+  var_i = paste("week_to_2020", (-5:10), sep = "::"),
+  week = -5:10,
+  coef = NaN, p = NaN,
+  CI_025 = NaN, CI_975 = NaN
+  ) %>%
+  .[week != -1]
+for (ii in 1:nrow(dt_temporal_glb)) {
+  
+  var_i_here <- dt_temporal_glb[ii, var_i]
+  
+  dt_temporal_glb[
+    ii,
+    c("coef", "p", "CI_025", "CI_975") := .(
+      coeftable(event_glb)[var_i_here, "Estimate"] %>% exp() - 1,
+      coeftable(event_glb)[var_i_here, "Pr(>|z|)"],
+      confint(event_glb, level = 0.95)[var_i_here, "2.5 %"] %>% exp() -1,
+      confint(event_glb, level = 0.95)[var_i_here, "97.5 %"] %>% exp() - 1
+    )
+  ]
+}
+dt_temporal_glb %>%
+  .[,
+    `:=`(
+      text_coef = sprintf("%.1f", coef*100),
+      text_CI = paste0(
+        "(",
+        sprintf("%.1f", CI_025*100),
+        ", ",
+        sprintf("%.1f", CI_975*100),
+        ")"
+      ),
+      text_p = sprintf("%.4f", p)
+    )
+  ]
+# Adj. Pseudo R2: 0.664045
+
+
+##---------------2.2 Countries with decreased fire
+event_dec <- feglm(
+  fmla_event,
+  panel_unbalance[CountryName %in% dt_coef_country[coef < 0, group_lab]],
+  family = "poisson",
+  vcov = as.formula(paste0("~", vvar))
+)
+event_dec
+# Observations: 2,844,520
+# Adj. Pseudo R2: 0.680077
+
+dt_temporal_dec <- data.table(
+  var_i = paste("week_to_2020", (-5:10), sep = "::"),
+  week = -5:10,
+  coef = NaN, p = NaN,
+  CI_025 = NaN, CI_975 = NaN
+  ) %>%
+  .[week != -1]
+for (ii in 1:nrow(dt_temporal_dec)) {
+  
+  var_i_here <- dt_temporal_dec[ii, var_i]
+  
+  dt_temporal_dec[
+    ii,
+    c("coef", "p", "CI_025", "CI_975") := .(
+      coeftable(event_dec)[var_i_here, "Estimate"] %>% exp() - 1,
+      coeftable(event_dec)[var_i_here, "Pr(>|z|)"],
+      confint(event_dec, level = 0.95)[var_i_here, "2.5 %"] %>% exp() -1,
+      confint(event_dec, level = 0.95)[var_i_here, "97.5 %"] %>% exp() - 1
+    )
+  ]
+}
+dt_temporal_dec %>%
+  .[,
+    `:=`(
+      text_coef = sprintf("%.1f", coef*100),
+      text_CI = paste0(
+        "(",
+        sprintf("%.1f", CI_025*100),
+        ", ",
+        sprintf("%.1f", CI_975*100),
+        ")"
+      ),
+      text_p = sprintf("%.4f", p)
+    )
+  ]
+# Adj. Pseudo R2: 0.680077
+
+
+##---------------2.3 Countries with increased fire
+event_inc <- feglm(
+  fmla_event,
+  panel_unbalance[CountryName %in% dt_coef_country[coef > 0, group_lab]],
+  family = "poisson",
+  vcov = as.formula(paste0("~", vvar))
+)
+event_inc
+# Observations: 1,606,519
+# Adj. Pseudo R2: 0.645819
+
+dt_temporal_inc <- data.table(
+  var_i = paste("week_to_2020", (-5:10), sep = "::"),
+  week = -5:10,
+  coef = NaN, p = NaN,
+  CI_025 = NaN, CI_975 = NaN
+  ) %>%
+  .[week != -1]
+for (ii in 1:nrow(dt_temporal_inc)) {
+  
+  var_i_here <- dt_temporal_inc[ii, var_i]
+  
+  dt_temporal_inc[
+    ii,
+    c("coef", "p", "CI_025", "CI_975") := .(
+      coeftable(event_inc)[var_i_here, "Estimate"] %>% exp() - 1,
+      coeftable(event_inc)[var_i_here, "Pr(>|z|)"],
+      confint(event_inc, level = 0.95)[var_i_here, "2.5 %"] %>% exp() -1,
+      confint(event_inc, level = 0.95)[var_i_here, "97.5 %"] %>% exp() - 1
+    )
+  ]
+}
+dt_temporal_inc %>%
+  .[,
+    `:=`(
+      text_coef = sprintf("%.1f", coef*100),
+      text_CI = paste0(
+        "(",
+        sprintf("%.1f", CI_025*100),
+        ", ",
+        sprintf("%.1f", CI_975*100),
+        ")"
+      ),
+      text_p = sprintf("%.4f", p)
+    )
+  ]
+# Adj. Pseudo R2: 0.645819
+
+```
+
+
+# Table S3
+
+Descriptions of the aggreagted approach of specific 16 landcover types.
+
+
+
